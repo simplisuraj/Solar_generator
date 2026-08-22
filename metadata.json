@@ -1,0 +1,6 @@
+{
+  "name": "Credit Appraisal Studio V10",
+  "description": "Evidence-aware Indian bank credit appraisal engine with page-level resumable document ingestion, 17-section dictionary extraction, cross-document reconciliation, strict validation gates, and intelligent mail merge.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
