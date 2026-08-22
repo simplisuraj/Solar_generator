@@ -48,6 +48,8 @@ function safeJsonParse<T>(text: string | undefined | null, fallback: T): T {
 }
 
 // Resilient Gemini structured caller with multi-model fallback & backoff
+const VALID_GEMINI_MODELS = ['gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+
 async function generateStructuredContent<T>(
   prompt: string,
   schema: any,
@@ -59,8 +61,8 @@ async function generateStructuredContent<T>(
     return fallbackValue;
   }
 
-  const modelsToTry = ['gemini-3.7-flash', 'gemini-2.5-flash'];
-  for (const model of modelsToTry) {
+  for (let i = 0; i < VALID_GEMINI_MODELS.length; i++) {
+    const model = VALID_GEMINI_MODELS[i];
     try {
       console.log(`[Gemini API] Dispatching structured request to ${model}...`);
       const response = await ai.models.generateContent({
@@ -78,17 +80,50 @@ async function generateStructuredContent<T>(
       }
     } catch (err: any) {
       const msg = err?.message || String(err);
-      const isTemporary =
-        msg.includes('503') ||
-        msg.includes('UNAVAILABLE') ||
-        msg.includes('high demand') ||
-        msg.includes('429') ||
-        msg.includes('RESOURCE_EXHAUSTED');
-      console.warn(`[Gemini API] ${model} warning: ${msg.slice(0, 150)}. ${isTemporary ? 'Attempting alternate model.' : ''}`);
+      const isQuotaOrRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
+      const isUnavailable = msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('high demand');
+      
+      console.warn(`[Gemini API] ${model} warning (${isQuotaOrRateLimit ? 'Quota / 429' : msg.slice(0, 120)}). ${i < VALID_GEMINI_MODELS.length - 1 ? 'Attempting alternate model.' : 'Using fallback.'}`);
+      
+      // If temporary rate limit, slight pause before trying the next tier model
+      if ((isQuotaOrRateLimit || isUnavailable) && i < VALID_GEMINI_MODELS.length - 1) {
+        await new Promise((r) => setTimeout(r, 400));
+      }
     }
   }
 
   return fallbackValue;
+}
+
+// Resilient Gemini text caller with multi-model fallback
+async function generateTextContent(
+  prompt: string,
+  fallbackText: string
+): Promise<string> {
+  const ai = getGenAI();
+  if (!ai) return fallbackText;
+
+  for (let i = 0; i < VALID_GEMINI_MODELS.length; i++) {
+    const model = VALID_GEMINI_MODELS[i];
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+      });
+      if (response.text && response.text.trim()) {
+        return response.text;
+      }
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      const isQuotaOrRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
+      console.warn(`[Gemini API] ${model} text generation warning (${isQuotaOrRateLimit ? 'Quota / 429' : msg.slice(0, 120)}).`);
+      if (isQuotaOrRateLimit && i < VALID_GEMINI_MODELS.length - 1) {
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+  }
+
+  return fallbackText;
 }
 
 // Health Check
@@ -112,9 +147,10 @@ app.post('/api/gemini/parse-page', async (req, res) => {
     });
   }
 
+  const defaultRawFormatted = raw_text.trim();
+
   if (!ai) {
-    // Return structured markdown directly
-    const fallbackMd = `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "llamaindex_native"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n${raw_text.trim()}`;
+    const fallbackMd = `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "llamaindex_native"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n${defaultRawFormatted}`;
     return res.json({ markdown: fallbackMd, parser: 'llamaindex_native' });
   }
 
@@ -130,12 +166,8 @@ Rules:
 PAGE CONTENT:
 ${(raw_text || '').slice(0, 15000)}`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
-      contents: prompt
-    });
-
-    const parsedBody = (response.text || raw_text).trim().replace(/^```markdown\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
+    const textResult = await generateTextContent(prompt, defaultRawFormatted);
+    const parsedBody = (textResult || defaultRawFormatted).trim().replace(/^```markdown\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
     const header = [
       '---',
       `document_id: ${document_id || 'doc'}`,
