@@ -1,13 +1,15 @@
 import express from 'express';
-import path from 'path';
+import path from 'node:path';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
+import { ArtifactRepository } from './src/lib/artifactRepository';
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
+const artifacts = new ArtifactRepository(path.resolve(process.env.ARTIFACT_ROOT || '.case-artifacts'));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -98,6 +100,36 @@ app.get('/api/health', (req, res) => {
     hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
     timestamp: new Date().toISOString()
   });
+});
+
+// Persistent P0 document artifacts. The filesystem is the authority for page state;
+// clients only render the manifest returned by these endpoints.
+app.post('/api/cases/:caseId/documents', async (req, res) => {
+  try {
+    const { id, filename, totalPages, parser, parserVersion } = req.body;
+    if (!id || !filename || !Number.isInteger(totalPages) || totalPages < 1) {
+      return res.status(400).json({ error: 'id, filename and a positive integer totalPages are required.' });
+    }
+    return res.json(await artifacts.initialize(req.params.caseId, { id, filename, totalPages, parser, parserVersion }));
+  } catch (error: any) { return res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/cases/:caseId/documents/:documentId', async (req, res) => {
+  try {
+    const manifest = await artifacts.get(req.params.caseId, req.params.documentId);
+    return manifest ? res.json(manifest) : res.status(404).json({ error: 'Document artifact not found.' });
+  } catch (error: any) { return res.status(500).json({ error: error.message }); }
+});
+
+app.post('/api/cases/:caseId/documents/:documentId/pages/:page', async (req, res) => {
+  try {
+    const page = Number(req.params.page);
+    if (!Number.isInteger(page) || page < 1) return res.status(400).json({ error: 'Invalid page.' });
+    const { markdown, parser, parserVersion, modelVersion, error } = req.body;
+    return res.json(await artifacts.savePage(req.params.caseId, req.params.documentId, page, {
+      markdown, parser: parser || 'unknown', parserVersion: parserVersion || 'unknown', modelVersion, error
+    }));
+  } catch (error: any) { return res.status(500).json({ error: error.message }); }
 });
 
 // 0. Page-Level Markdown Parser Endpoint (Structures tables, clauses, and headers)

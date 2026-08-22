@@ -38,7 +38,6 @@ import {
   stitchDocumentMarkdown,
   createDocumentCaseItem,
   calculateAccuratePageCount,
-  splitTextIntoPageChunks,
   formatPageMarkdown
 } from './lib/pageParserEngine';
 import { runStructuredExtraction } from './lib/geminiExtractionEngine';
@@ -48,6 +47,14 @@ import {
   clientInferStage,
   clientMailMerge
 } from './lib/clientEngine';
+
+async function runBounded(tasks: Array<() => Promise<void>>, concurrency: number) {
+  const limit = Math.max(1, Math.floor(concurrency));
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+    while (next < tasks.length) await tasks[next++]();
+  }));
+}
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveViewTab>('parsing_monitor');
@@ -140,8 +147,10 @@ export function App() {
     // Convert sample files to DocumentCaseItems with true accurate page count and page chunks
     const caseDocs: DocumentCaseItem[] = sample.files.map((file) => {
       const pageCount = file.pageCount || calculateAccuratePageCount(file);
-      const doc = createDocumentCaseItem(file, pageCount);
-      const chunks = splitTextIntoPageChunks(file.text, pageCount);
+      // Demo fixtures retain their explicitly authored markers. Uploaded PDFs never
+      // take this path: their boundaries come from PDF.js page objects.
+      const chunks = file.text.split(/\[PDF\s+page\s+\d+\]\s*/i).filter(Boolean).map((chunk) => chunk.trim());
+      const doc = createDocumentCaseItem({ ...file, pageTexts: chunks.length ? chunks : [file.text] }, pageCount);
 
       for (let p = 1; p <= doc.total_pages; p++) {
         const pText = chunks[p - 1] || '';
@@ -230,6 +239,10 @@ export function App() {
     });
 
     setDocuments(newDocs);
+    void Promise.all(newDocs.map((doc) => fetch(`/api/cases/${caseId}/documents`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: doc.id, filename: doc.filename, totalPages: doc.total_pages, parser: 'pdfjs-dist', parserVersion: '4.10.38' })
+    })));
     if (newDocs.length > 0 && !selectedDocId) {
       setSelectedDocId(newDocs[0].id);
     }
@@ -242,12 +255,31 @@ export function App() {
     const doc = documents.find((d) => d.id === docId);
     if (!doc) return;
 
+    const cached = await fetch(`/api/cases/${caseId}/documents/${docId}`)
+      .then((response) => response.ok ? response.json() : null).catch(() => null);
+    if (cached?.pages?.find((page: { page: number; status: string }) => page.page === pageNum)?.status === 'SUCCESS') return;
+    if (!cached) {
+      await fetch(`/api/cases/${caseId}/documents`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: doc.id, filename: doc.filename, totalPages: doc.total_pages, parser: 'pdfjs-dist', parserVersion: '4.10.38' })
+      });
+    }
+
     setActiveProcessingPage({ docId, page: pageNum });
     logAudit('PAGE_STARTED', `Parsing page ${pageNum} via ${settings.defaultParser}`, docId, doc.filename, pageNum);
 
     // Call pageParserEngine
     const parseResult = await parseSinglePage(doc, pageNum, {
       useOCR: settings.useOCRForScanned
+    });
+    const artifactResponse = await fetch(`/api/cases/${caseId}/documents/${docId}/pages/${pageNum}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ markdown: parseResult.markdown || undefined, parser: parseResult.pageMetadata.parser, parserVersion: 'p0', error: parseResult.pageMetadata.error })
+    });
+    const manifest = artifactResponse.ok ? await artifactResponse.json() : null;
+    if (manifest) parseResult.updatedDoc.pages = parseResult.updatedDoc.pages.map((page) => {
+      const persisted = manifest.pages.find((candidate: { page: number }) => candidate.page === page.page);
+      return persisted ? { ...page, ...persisted } : page;
     });
 
     // Update document state
@@ -270,13 +302,11 @@ export function App() {
     const doc = documents.find((d) => d.id === docId);
     if (!doc) return;
 
-    const failedPages = doc.pages.filter((p) => p.status === 'FAILED');
+    const failedPages = doc.pages.filter((p) => ['FAILED', 'MISSING', 'INVALID'].includes(p.status));
     setIsProcessing(true);
     logAudit('PAGE_RETRIED', `Retrying ${failedPages.length} failed pages`, docId, doc.filename);
 
-    for (const p of failedPages) {
-      await handleParsePage(docId, p.page);
-    }
+    await runBounded(failedPages.map((p) => () => handleParsePage(docId, p.page)), settings.concurrency);
     setIsProcessing(false);
   };
 
@@ -288,9 +318,7 @@ export function App() {
     setIsProcessing(true);
     logAudit('PAGE_STARTED', `Reprocessing all ${doc.total_pages} pages`, docId, doc.filename);
 
-    for (let p = 1; p <= doc.total_pages; p++) {
-      await handleParsePage(docId, p);
-    }
+    await runBounded(Array.from({ length: doc.total_pages }, (_, i) => () => handleParsePage(docId, i + 1)), settings.concurrency);
     setIsProcessing(false);
   };
 
@@ -299,14 +327,9 @@ export function App() {
     setIsProcessing(true);
     logAudit('PAGE_STARTED', `Batch parsing all ${documents.length} ingested documents`);
 
-    for (const doc of documents) {
-      for (let p = 1; p <= doc.total_pages; p++) {
-        const existingPage = doc.pages.find((page) => page.page === p);
-        if (!existingPage || existingPage.status !== 'SUCCESS') {
-          await handleParsePage(doc.id, p);
-        }
-      }
-    }
+    await runBounded(documents.flatMap((doc) => doc.pages
+      .filter((page) => ['FAILED', 'MISSING', 'INVALID', 'QUEUED'].includes(page.status))
+      .map((page) => () => handleParsePage(doc.id, page.page))), settings.concurrency);
     setIsProcessing(false);
   };
 
