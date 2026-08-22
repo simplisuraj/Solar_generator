@@ -1,4 +1,4 @@
-export type PageStatus = 'QUEUED' | 'PROCESSING' | 'SUCCESS' | 'FAILED' | 'RETRYING' | 'SKIPPED';
+export type PageStatus = 'QUEUED' | 'PROCESSING' | 'SUCCESS' | 'FAILED' | 'RETRYING' | 'SKIPPED' | 'MISSING' | 'INVALID';
 
 export type DocumentStatus =
   | 'NOT_UPLOADED'
@@ -45,6 +45,9 @@ export interface PageMetadata {
   completed_at?: string | null;
   processing_time_seconds?: number | null;
   parser: string;
+  sha256?: string;
+  parser_version?: string;
+  model_version?: string;
   error?: string | null;
   char_count?: number;
   has_text?: boolean;
@@ -212,6 +215,8 @@ export interface IngestedFile {
   uploadedAt: string;
   id?: string;
   pageCount?: number;
+  /** Exact parser-defined page boundaries; never inferred from character count. */
+  pageTexts?: string[];
 }
 
 export interface AuditLogEntry {

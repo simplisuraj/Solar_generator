@@ -50,7 +50,8 @@ export function formatPageMarkdown(
 }
 
 /**
- * Accurately calculate the true page count of any file
+ * Page counts are supplied by a format parser. Text-like sources are one logical page;
+ * this function intentionally never estimates PDF/DOCX pages from bytes or characters.
  */
 export function calculateAccuratePageCount(file: {
   name: string;
@@ -72,36 +73,8 @@ export function calculateAccuratePageCount(file: {
     return 1;
   }
 
-  // Check for explicit PDF page markers: [PDF page 1], [PDF page 2], etc.
-  const pdfPageMarkers = Array.from(text.matchAll(/\[PDF\s+page\s+(\d+)\]/gi));
-  if (pdfPageMarkers.length > 0) {
-    return pdfPageMarkers.length;
-  }
-
-  // Check for form feed character \f
-  const formFeeds = text.split('\f').filter((x) => x.trim().length > 0);
-  if (formFeeds.length > 1) {
-    return formFeeds.length;
-  }
-
-  // Check for explicit "Page X of Y" or "--- Page X ---"
-  const explicitPageMarkers = Array.from(
-    text.matchAll(/(?:---\s*Page\s*\d+\s*---|Page\s+\d+\s+of\s+\d+)/gi)
-  );
-  if (explicitPageMarkers.length > 1) {
-    return explicitPageMarkers.length;
-  }
-
-  // For DOCX: LOA, PVSyst, or short tech reports under 4000 chars are 1 page
-  if (nameLower.endsWith('.docx') || file.type?.includes('word')) {
-    if (text.length <= 4000) return 1;
-    return Math.max(1, Math.ceil(text.length / 3000));
-  }
-
-  // Generic fallback based on standard A4 page density (~2500-3000 chars per page)
-  const charCount = file.charCount || text.length || 0;
-  if (charCount <= 3000) return 1;
-  return Math.max(1, Math.ceil(charCount / 2500));
+  void nameLower; void text;
+  return 1;
 }
 
 /**
@@ -265,51 +238,18 @@ function cleanAndFormatMarkdown(text: string, pageNumber: number): string {
 export function splitTextIntoPageChunks(rawText: string, targetPages: number = 1): string[] {
   if (!rawText || !rawText.trim()) return [''];
 
-  // 1. If explicit [PDF page X] markers exist
-  const pdfMatches = Array.from(rawText.matchAll(/\[PDF\s+page\s*(\d+)\]/gi));
-  if (pdfMatches.length > 0) {
-    const pages: string[] = [];
-    for (let i = 0; i < pdfMatches.length; i++) {
-      const startIdx = pdfMatches[i].index! + pdfMatches[i][0].length;
-      const endIdx = i < pdfMatches.length - 1 ? pdfMatches[i + 1].index! : rawText.length;
-      const pageText = rawText.slice(startIdx, endIdx).trim();
-      pages.push(pageText);
-    }
-    return pages;
-  }
-
-  // 2. Check for form feeds \f
+  // A form feed is emitted only by the upload parser between real PDF pages.
   if (rawText.includes('\f')) {
     const pages = rawText.split('\f').map((p) => p.trim()).filter(Boolean);
     if (pages.length > 0) return pages;
   }
 
-  // 3. If targetPages is 1, return the whole text as single page
+  // Text and other non-paginated formats are a single logical page.
   if (targetPages <= 1) {
     return [rawText.trim()];
   }
 
-  // 4. Otherwise split into targetPages segments cleanly by paragraph
-  const paragraphs = rawText.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
-  if (paragraphs.length <= targetPages) {
-    const chunkSize = Math.ceil(rawText.length / targetPages);
-    const chunks: string[] = [];
-    for (let i = 0; i < targetPages; i++) {
-      const chunk = rawText.slice(i * chunkSize, (i + 1) * chunkSize).trim();
-      if (chunk) chunks.push(chunk);
-    }
-    return chunks.length > 0 ? chunks : [rawText];
-  }
-
-  const perPage = Math.ceil(paragraphs.length / targetPages);
-  const chunks: string[] = [];
-  for (let i = 0; i < targetPages; i++) {
-    const slice = paragraphs.slice(i * perPage, (i + 1) * perPage);
-    if (slice.length > 0) {
-      chunks.push(slice.join('\n\n'));
-    }
-  }
-  return chunks.length > 0 ? chunks : [rawText];
+  throw new Error(`Missing real page boundaries for a ${targetPages}-page document.`);
 }
 
 /**
@@ -318,8 +258,8 @@ export function splitTextIntoPageChunks(rawText: string, targetPages: number = 1
 export function createDocumentCaseItem(file: IngestedFile, explicitPageCount?: number): DocumentCaseItem {
   const safeId = file.name.replace(/[^a-zA-Z0-9_]/g, '_');
   const truePages = explicitPageCount || calculateAccuratePageCount(file);
-  const chunks = splitTextIntoPageChunks(file.text, truePages);
-  const totalPages = Math.max(chunks.length, truePages, 1);
+  const chunks = file.pageTexts || splitTextIntoPageChunks(file.text, truePages);
+  const totalPages = truePages;
 
   const pages: PageMetadata[] = Array.from({ length: totalPages }, (_, i) => ({
     page: i + 1,

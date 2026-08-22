@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import JSZip from 'jszip';
+import * as pdfjs from 'pdfjs-dist';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import {
   Upload,
   FileText,
@@ -51,17 +53,18 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
 
     for (let i = 0; i < uploadedFiles.length; i++) {
       const file = uploadedFiles[i];
-      const { text, pageCount } = await parseUploadedFile(file, useOCR);
+      const parsed = await parseUploadedFile(file, useOCR);
       const parserMethod = getParserMethod(file.name, useOCR);
 
       newFiles.push({
         name: file.name,
         type: file.type || 'text/plain',
         size: file.size,
-        text: text,
+        text: parsed.text,
         parserMethod: parserMethod,
-        charCount: text.length,
-        pageCount: pageCount,
+        charCount: parsed.text.length,
+        pageCount: parsed.pageCount,
+        pageTexts: parsed.pageTexts,
         uploadedAt: new Date().toISOString(),
       });
     }
@@ -395,7 +398,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
   );
 };
 
-async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: string; pageCount: number }> {
+async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: string; pageCount: number; pageTexts?: string[] }> {
   const lower = file.name.toLowerCase();
 
   // DOCX files: parse via JSZip
@@ -419,20 +422,24 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
         }
         const fullText = lines.join('\n\n');
         const pageCount = calculateAccuratePageCount({ name: file.name, text: fullText });
-        return { text: fullText, pageCount };
+        return { text: fullText, pageCount, pageTexts: [fullText] };
       }
     } catch (e) {
       console.warn('DOCX ZIP parsing failed, reading as text fallback:', e);
     }
   }
 
-  // PDF files: detect page count and extract text
+  // PDF files: PDF.js reads the catalog and each page's text content. Do not inspect
+  // PDF bytes or derive boundaries from character counts.
   if (lower.endsWith('.pdf')) {
     try {
-      const text = await readFileAsText(file);
-      const pageMatches = text.match(/\/Type\s*\/Page\b/g);
-      const detectedPages = pageMatches ? pageMatches.length : calculateAccuratePageCount({ name: file.name, text });
-      return { text, pageCount: Math.max(1, detectedPages) };
+      pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
+      const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+      const pageTexts = await Promise.all(Array.from({ length: pdf.numPages }, async (_, index) => {
+        const content = await (await pdf.getPage(index + 1)).getTextContent();
+        return content.items.map((item) => ('str' in item ? item.str : '')).join(' ').trim();
+      }));
+      return { text: pageTexts.join('\f'), pageCount: pdf.numPages, pageTexts };
     } catch (e) {
       console.warn('PDF parsing error:', e);
     }
@@ -441,7 +448,7 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
   // JSON or text files
   const rawText = await readFileAsText(file);
   const pageCount = calculateAccuratePageCount({ name: file.name, text: rawText });
-  return { text: rawText, pageCount };
+  return { text: rawText, pageCount, pageTexts: [rawText] };
 }
 
 function readFileAsText(file: File): Promise<string> {
