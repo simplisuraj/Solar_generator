@@ -53,10 +53,7 @@ export function App() {
   const [activeTab, setActiveTab] = useState<ActiveViewTab>('documents');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [hasGeminiKey, setHasGeminiKey] = useState<boolean>(false);
-  const [activeProcessingPage, setActiveProcessingPage] = useState<{
-    docId: string;
-    page: number;
-  } | null>(null);
+  const [activeProcessingPages, setActiveProcessingPages] = useState<Set<string>>(new Set());
 
   // App Settings
   const [settings, setSettings] = useState<AppSettings>({
@@ -239,6 +236,9 @@ export function App() {
 
   // Parse a single page with LED tracker
   const handleParsePage = useCallback(async (docId: string, pageNum: number, doc?: DocumentCaseItem) => {
+    const pageKey = `${docId}-${pageNum}`;
+    setActiveProcessingPages((prev) => new Set(prev).add(pageKey));
+
     setDocuments((prev) => {
       const d = prev.find((d) => d.id === docId);
       if (!d) return prev;
@@ -256,8 +256,6 @@ export function App() {
       };
       return prev.map((d) => (d.id === docId ? { ...d, pages: newPages } : d));
     });
-
-    setActiveProcessingPage({ docId, page: pageNum });
 
     const currentDoc = doc || documentsRef.current.find((d) => d.id === docId);
     const docForLog = currentDoc || documentsRef.current.find((d) => d.id === docId);
@@ -290,16 +288,60 @@ export function App() {
         };
         return prev.map((d) => (d.id === docId ? { ...d, pages: newPages } : d));
       });
-      setActiveProcessingPage(null);
+      setActiveProcessingPages((prev) => {
+        const next = new Set(prev);
+        next.delete(pageKey);
+        return next;
+      });
       logAudit('PAGE_FAILED', e?.message || String(e), docId, docForLog?.filename, pageNum);
       return;
     }
 
-    setDocuments((prev) =>
-      prev.map((d) => (d.id === docId ? parseResult.updatedDoc : d))
-    );
+    setDocuments((prev) => {
+      const d = prev.find((d) => d.id === docId);
+      if (!d) return prev;
+      const pageIdx = d.pages.findIndex((p) => p.page === pageNum);
+      if (pageIdx === -1) return prev;
+      const newPages = [...d.pages];
+      newPages[pageIdx] = parseResult.pageMetadata;
+      const newPageMarkdowns = { ...d.page_markdowns, [pageNum]: parseResult.markdown };
+      const successCount = newPages.filter((p) => p.status === 'SUCCESS').length;
+      const failedCount = newPages.filter((p) => p.status === 'FAILED').length;
+      const docStatus = successCount > 0 && failedCount === 0 ? 'READY_FOR_EXTRACTION' : (successCount > 0 ? 'PARTIALLY_PARSED' : (failedCount > 0 ? 'FAILED' : 'UPLOADED'));
+      const missing = newPages.filter((p) => p.status !== 'SUCCESS').map((p) => p.page);
+      let stitched = d.stitched_markdown;
+      let isComplete = d.is_stitched_complete;
+      if (missing.length === 0 && !isComplete) {
+        const parts = [
+          "---",
+          `source_file: "${d.filename}"`,
+          `total_pages: ${d.total_pages}`,
+          `stitched_at: "${new Date().toISOString()}"`,
+          "---",
+          ""
+        ];
+        for (let i = 0; i < newPages.length; i++) {
+          parts.push(`# Page ${i + 1}`, "", newPageMarkdowns[i + 1] || "[No content]", "");
+        }
+        stitched = parts.join("\n").trim() + "\n";
+        isComplete = true;
+      }
+      return prev.map((d) => (d.id === docId ? {
+        ...d,
+        status: docStatus,
+        pages: newPages,
+        page_markdowns: newPageMarkdowns,
+        stitched_markdown: stitched,
+        is_stitched_complete: isComplete,
+        missing_pages: missing
+      } : d));
+    });
 
-    setActiveProcessingPage(null);
+    setActiveProcessingPages((prev) => {
+      const next = new Set(prev);
+      next.delete(pageKey);
+      return next;
+    });
     logAudit(
       parseResult.pageMetadata.status === 'SUCCESS' ? 'PAGE_SUCCEEDED' : 'PAGE_FAILED',
       parseResult.pageMetadata.error || `Completed in ${parseResult.pageMetadata.processing_time_seconds}s`,
@@ -307,7 +349,7 @@ export function App() {
       docForLog?.filename,
       pageNum
     );
-  }, [settings.defaultParser, settings.useOCRForScanned, logAudit, setDocuments, setActiveProcessingPage]);
+  }, [settings.defaultParser, settings.useOCRForScanned, logAudit, setDocuments]);
 
   // Single worker loop that claims QUEUED pages one by one
   const runWorker = useCallback(async (
@@ -333,10 +375,12 @@ export function App() {
         if (!doc) continue;
 
         const docPages = pageSelector(doc);
-        for (const page of docPages) {
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < docPages.length; i += BATCH_SIZE) {
           if (controller.signal.aborted) break;
-          if (page.status === 'SUCCESS') continue;
-          await handleParsePage(docId, page.page, doc);
+          const batch = docPages.slice(i, i + BATCH_SIZE).filter((p) => p.status !== 'SUCCESS');
+          if (batch.length === 0) continue;
+          await Promise.all(batch.map((page) => handleParsePage(docId, page.page, doc)));
         }
       }
     } finally {
@@ -661,7 +705,7 @@ export function App() {
             onReprocessAllPages={handleReprocessAllPages}
             onParseAllDocuments={handleParseAllDocuments}
             isProcessing={isProcessing}
-            activeProcessingPage={activeProcessingPage}
+            activeProcessingPages={activeProcessingPages}
             onProceedToExtraction={() => {
               if (classifiedDocs.length === 0) {
                 handleRunClassification();

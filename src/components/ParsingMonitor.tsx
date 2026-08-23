@@ -35,7 +35,7 @@ interface ParsingMonitorProps {
   onReprocessAllPages: (docId: string) => Promise<void>;
   onParseAllDocuments: () => Promise<void>;
   isProcessing: boolean;
-  activeProcessingPage?: { docId: string; page: number } | null;
+  activeProcessingPages: Set<string>;
   onProceedToExtraction: () => void;
 }
 
@@ -48,7 +48,7 @@ export const ParsingMonitor: React.FC<ParsingMonitorProps> = ({
   onReprocessAllPages,
   onParseAllDocuments,
   isProcessing,
-  activeProcessingPage,
+  activeProcessingPages,
   onProceedToExtraction
 }) => {
   const [selectedPageDetail, setSelectedPageDetail] = useState<{
@@ -379,8 +379,7 @@ export const ParsingMonitor: React.FC<ParsingMonitorProps> = ({
                 <div className="grid grid-cols-6 sm:grid-cols-10 md:grid-cols-12 lg:grid-cols-16 gap-2">
                   {visiblePages.map((page) => {
                     const isProcessingThis =
-                      activeProcessingPage?.docId === activeDoc.id &&
-                      activeProcessingPage?.page === page.page;
+                      activeProcessingPages.has(`${activeDoc.id}-${page.page}`);
 
                     return (
                       <button
