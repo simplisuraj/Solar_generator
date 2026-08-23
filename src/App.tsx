@@ -380,6 +380,12 @@ export function App() {
     );
   }, [documents, logAudit, runWorker]);
 
+  const handleProceedToParsing = useCallback(async () => {
+    if (documents.length === 0) return;
+    handleParseAllDocuments().catch((e) => console.warn('Parse error:', e));
+    setActiveTab('parsing_monitor');
+  }, [documents.length, handleParseAllDocuments, setActiveTab]);
+
   // Execute Step 2: Document Intelligence
   const handleRunClassification = async () => {
     setIsProcessing(true);
@@ -637,12 +643,8 @@ export function App() {
           <Step1Upload
             files={files}
             onFilesChange={handleFilesChange}
-            onNext={() => setActiveTab('parsing_monitor')}
+            onProceed={handleProceedToParsing}
             isProcessing={isProcessing}
-            useOCR={settings.useOCRForScanned}
-            onToggleOCR={(enabled) =>
-              setSettings((prev) => ({ ...prev, useOCRForScanned: enabled }))
-            }
           />
         )}
 

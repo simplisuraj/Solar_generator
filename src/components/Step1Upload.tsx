@@ -15,19 +15,15 @@ import { calculateAccuratePageCount } from '../lib/pageParserEngine';
 interface Step1UploadProps {
   files: IngestedFile[];
   onFilesChange: (files: IngestedFile[]) => void;
-  onNext: () => void;
+  onProceed: () => void;
   isProcessing: boolean;
-  useOCR: boolean;
-  onToggleOCR: (enabled: boolean) => void;
 }
 
 export const Step1Upload: React.FC<Step1UploadProps> = ({
   files,
   onFilesChange,
-  onNext,
+  onProceed,
   isProcessing,
-  useOCR,
-  onToggleOCR,
 }) => {
   const [activeTab, setActiveTab] = useState<'upload'>('upload');
   const [previewFile, setPreviewFile] = useState<IngestedFile | null>(null);
@@ -43,7 +39,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
       const file = uploadedFiles[i];
       const lower = file.name.toLowerCase();
       const { text, pageCount } = await parseUploadedFile(file, false);
-      const parserMethod = getParserMethod(file.name, useOCR);
+      const parserMethod = getParserMethod(file.name);
 
       newFiles.push({
         name: file.name,
@@ -67,7 +63,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
     onFilesChange(updated);
   };
 
-  const totalChars = files.reduce((acc, f) => acc + f.charCount, 0);
+  const totalPages = files.reduce((acc, f) => acc + (f.pageCount || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -139,7 +135,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                 Ingested Documents ({files.length})
               </h3>
               <span className="text-[10px] font-bold uppercase bg-slate-100 text-slate-600 px-2 py-0.5 rounded">
-                {totalChars.toLocaleString()} characters
+                {totalPages} pages
               </span>
             </div>
             <button
@@ -155,8 +151,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               <thead className="bg-slate-50 text-[11px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-200">
                 <tr>
                   <th className="px-6 py-3">Document Name</th>
-                  <th className="px-6 py-3">Parser Method</th>
-                  <th className="px-6 py-3">Size / Chars</th>
+                  <th className="px-6 py-3">Pages</th>
                   <th className="px-6 py-3">Status</th>
                   <th className="px-6 py-3 text-right">Actions</th>
                 </tr>
@@ -168,13 +163,8 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                       <FileText className="w-4 h-4 text-indigo-600 shrink-0" />
                       <span className="truncate max-w-xs md:max-w-md">{file.name}</span>
                     </td>
-                    <td className="px-6 py-3.5 font-mono text-xs">
-                      <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-[11px]">
-                        {file.parserMethod}
-                      </span>
-                    </td>
                     <td className="px-6 py-3.5 font-mono text-xs text-slate-500">
-                      {file.charCount.toLocaleString()} chars
+                      {file.pageCount || '—'}
                     </td>
                     <td className="px-6 py-3.5">
                       <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded text-[10px] font-bold uppercase">
@@ -206,7 +196,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
           {/* Action Footer */}
           <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
             <button
-              onClick={onNext}
+              onClick={onProceed}
               disabled={files.length === 0 || isProcessing}
               className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold text-xs px-4 py-2 rounded-md shadow-sm flex items-center gap-2 transition-all cursor-pointer"
             >
@@ -449,10 +439,10 @@ function readFileAsLatin1(file: File): Promise<string> {
   });
 }
 
-function getParserMethod(fileName: string, useOCR: boolean): string {
+function getParserMethod(fileName: string): string {
   const lower = fileName.toLowerCase();
   if (lower.endsWith('.docx')) return 'DOCX parser';
-  if (lower.endsWith('.pdf')) return useOCR ? 'PDF parser + OCR fallback' : 'PDF parser';
+  if (lower.endsWith('.pdf')) return 'PDF parser';
   if (lower.endsWith('.json')) return 'JSON parser';
   if (lower.match(/\.(png|jpg|jpeg|webp)$/)) return 'Tesseract / Vision OCR';
   return 'Text / Markdown parser';
