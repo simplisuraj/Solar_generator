@@ -8,6 +8,7 @@ export interface DocumentParser {
     pageNumber: number;
     totalPages: number;
     pageRawText?: string;
+    rawSourceFile?: Blob | null;
     useOCR?: boolean;
   }): Promise<{
     markdown: string;
@@ -116,6 +117,7 @@ export class LlamaIndexDocumentParser implements DocumentParser {
     pageNumber: number;
     totalPages: number;
     pageRawText?: string;
+    rawSourceFile?: Blob | null;
     useOCR?: boolean;
   }): Promise<{
     markdown: string;
@@ -128,6 +130,32 @@ export class LlamaIndexDocumentParser implements DocumentParser {
     let raw = params.pageRawText || '';
     const hasSearchable = raw.trim().length > 15;
 
+    // For scanned pages (no text layer) of a PDF we still have on disk,
+    // render the page image via the Python backend so the AI parser can
+    // transcribe it with vision instead of returning an empty page.
+    let pageImage: { data: string; mimeType: string } | null = null;
+    if (!hasSearchable && params.rawSourceFile instanceof Blob) {
+      try {
+        const buf = await params.rawSourceFile.arrayBuffer();
+        const imgResp = await fetch('/api/pdf/page-image', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/pdf',
+            'x-page-number': String(params.pageNumber)
+          },
+          body: buf
+        });
+        if (imgResp.ok) {
+          const imgData = await imgResp.json();
+          if (imgData && imgData.imageBase64) {
+            pageImage = { data: imgData.imageBase64, mimeType: imgData.mimeType || 'image/png' };
+          }
+        }
+      } catch (e) {
+        console.warn('[PageParser] page-image render failed, continuing without vision input:', e);
+      }
+    }
+
     // First attempt real server-side API call to structure page markdown
     try {
       const resp = await fetch('/api/gemini/parse-page', {
@@ -139,7 +167,8 @@ export class LlamaIndexDocumentParser implements DocumentParser {
           page_number: params.pageNumber,
           total_pages: params.totalPages,
           raw_text: raw,
-          use_ocr: params.useOCR
+          use_ocr: params.useOCR,
+          page_image: pageImage
         })
       });
 
@@ -348,7 +377,8 @@ export function createDocumentCaseItem(file: IngestedFile, explicitPageCount?: n
     stitched_markdown: null,
     is_stitched_complete: false,
     missing_pages: Array.from({ length: totalPages }, (_, i) => i + 1),
-    raw_source_text: file.text
+    raw_source_text: file.text,
+    raw_source_file: file.rawBlob || null
   };
 }
 
@@ -402,6 +432,7 @@ export async function parseSinglePage(
       pageNumber,
       totalPages: doc.total_pages,
       pageRawText: rawPageText,
+      rawSourceFile: doc.raw_source_file,
       useOCR: options.useOCR ?? true
     });
 

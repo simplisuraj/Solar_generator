@@ -9,6 +9,8 @@ are untouched; Express proxies /api/pdf/* to this service.
 import io
 import re
 
+import base64
+
 import pypdfium2 as pdfium
 from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -79,6 +81,40 @@ async def parse_pdf(request: Request):
             "scannedPages": scanned_count,
             "isMostlyScanned": page_count > 0 and scanned_count > page_count / 2,
             "parser": "pypdfium2",
+        }
+    finally:
+        pdf.close()
+
+
+@app.post("/api/pdf/page-image")
+async def render_page_image(request: Request):
+    """Render one page of an uploaded PDF to PNG for AI (Gemini vision) parsing."""
+    data = await request.body()
+    page_number = int(request.headers.get("x-page-number", "1"))
+    scale = float(request.headers.get("x-render-scale", "2"))  # ~144 DPI
+
+    if not data[:5] == b"%PDF-":
+        return JSONResponse(status_code=400, content={"error": "Not a PDF file"})
+
+    try:
+        pdf = pdfium.PdfDocument(io.BytesIO(data))
+    except Exception as e:
+        return JSONResponse(status_code=422, content={"error": f"Unreadable PDF: {e}"})
+
+    try:
+        if page_number < 1 or page_number > len(pdf):
+            return JSONResponse(status_code=400, content={"error": f"Page {page_number} out of range (1-{len(pdf)})"})
+        page = pdf[page_number - 1]
+        bitmap = page.render(scale=scale)
+        pil_image = bitmap.to_pil()
+        buf = io.BytesIO()
+        pil_image.save(buf, format="PNG", optimize=True)
+        return {
+            "pageNumber": page_number,
+            "mimeType": "image/png",
+            "imageBase64": base64.b64encode(buf.getvalue()).decode("ascii"),
+            "width": pil_image.width,
+            "height": pil_image.height,
         }
     finally:
         pdf.close()

@@ -59,6 +59,7 @@ export interface DocumentCaseItem {
   total_pages: number;
   status: DocumentStatus;
   uploaded_at: string;
+  raw_source_file?: Blob | null;
   document_type?: string;
   group?: string;
   priority?: string;
@@ -212,6 +213,7 @@ export interface IngestedFile {
   uploadedAt: string;
   id?: string;
   pageCount?: number;
+  rawBlob?: Blob | null;
 }
 
 export interface AuditLogEntry {

@@ -45,6 +45,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
 
     for (let i = 0; i < uploadedFiles.length; i++) {
       const file = uploadedFiles[i];
+      const lower = file.name.toLowerCase();
       const { text, pageCount } = await parseUploadedFile(file, useOCR);
       const parserMethod = getParserMethod(file.name, useOCR);
 
@@ -57,6 +58,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
         charCount: text.length,
         pageCount: pageCount,
         uploadedAt: new Date().toISOString(),
+        rawBlob: lower.endsWith('.pdf') ? file : null,
       });
     }
 
