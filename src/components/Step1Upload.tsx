@@ -375,7 +375,7 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
   if (lower.endsWith('.pdf')) {
     try {
       const inspected = await inspectPdfViaBackend(file);
-      if (inspected) return inspected;
+      if (inspected) return { text: inspected.text, pageCount: inspected.pageCount || 1 };
     } catch (e) {
       console.warn('PDF inspection unavailable, falling back to raw scan:', e);
     }
