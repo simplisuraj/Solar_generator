@@ -150,7 +150,6 @@ export class LlamaIndexDocumentParser implements DocumentParser {
       let lastErr: any = null;
       for (let attempt = 0; attempt <= PAGE_PARSE_RETRIES; attempt++) {
         try {
-          const buf = await params.rawSourceFile.arrayBuffer();
           const resp = await fetchWithTimeout('/api/pdf/page-parse', {
             method: 'POST',
             headers: {
@@ -158,7 +157,7 @@ export class LlamaIndexDocumentParser implements DocumentParser {
               'x-page-number': String(params.pageNumber),
               'x-file-name': encodeURIComponent(params.filename)
             },
-            body: buf
+            body: params.rawSourceFile
           });
 
           if (resp.ok) {
