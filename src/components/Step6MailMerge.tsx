@@ -73,7 +73,13 @@ export const Step6MailMerge: React.FC<Step6MailMergeProps> = ({
   };
 
   const getFieldVal = (id: string, def = '[MISSING]') => {
-    const found = fields.find((f) => f.field_id === id && f.status === 'available');
+    const found = fields.find(
+      (f) =>
+        f.field_id === id &&
+        (f.status === 'FOUND' || f.status === 'CALCULATED') &&
+        f.value !== null &&
+        f.value !== undefined
+    );
     return found ? String(found.value) : def;
   };
 

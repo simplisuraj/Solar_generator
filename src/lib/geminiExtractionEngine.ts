@@ -253,6 +253,32 @@ export function extractEvidenceFromPageMarkdowns(
 }
 
 /**
+ * A model response is useful only when its citation can be traced back to a
+ * successfully parsed source page. This prevents an otherwise well-formed API
+ * response from introducing an unsupported fact into the canonical dataset.
+ */
+function isGroundedApiResult(
+  result: Record<string, unknown>,
+  documents: DocumentCaseItem[]
+): boolean {
+  const sourceDocument = typeof result.source_document === 'string' ? result.source_document : '';
+  const sourcePage = result.source_page;
+  const evidence = typeof result.evidence === 'string' ? result.evidence.trim() : '';
+
+  if (!sourceDocument || !Number.isInteger(sourcePage) || (sourcePage as number) < 1 || !evidence) {
+    return false;
+  }
+
+  const document = documents.find((doc) => doc.filename === sourceDocument);
+  const page = document?.pages.find((item) => item.page === sourcePage && item.status === 'SUCCESS');
+  const markdown = page ? document?.page_markdowns[sourcePage as number] : undefined;
+  if (!markdown) return false;
+
+  const normalize = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase();
+  return normalize(markdown).includes(normalize(evidence));
+}
+
+/**
  * Run structured extraction for a list of data dictionary fields against cached markdown documents
  * Makes real API calls to /api/gemini/extract-from-markdown with resilient fallback
  */
@@ -335,17 +361,23 @@ export async function runStructuredExtraction(
       let method: 'gemini_markdown' | 'deterministic_parser' = 'deterministic_parser';
 
       // If Gemini returned a verified fact with evidence
-      if (apiResult && apiResult.status === 'FOUND' && apiResult.value !== null && apiResult.value !== undefined) {
+      if (
+        apiResult &&
+        apiResult.status === 'FOUND' &&
+        apiResult.value !== null &&
+        apiResult.value !== undefined &&
+        isGroundedApiResult(apiResult, availableDocs)
+      ) {
         finalValue = apiResult.value;
         finalStatus = 'FOUND';
         finalDoc = apiResult.source_document || localResult.source_document;
-        finalPage = apiResult.source_page || localResult.source_page;
+        finalPage = apiResult.source_page ?? localResult.source_page;
         finalSection = apiResult.source_section || localResult.source_section || 'Verified Clause';
         finalEvidence = apiResult.evidence || localResult.evidence;
         finalConfidence = Math.max(apiResult.confidence || 0.95, 0.9);
         method = 'gemini_markdown';
       } else if (localResult.status === 'FOUND') {
-        method = 'gemini_markdown';
+        method = 'deterministic_parser';
       }
 
       const extractedField: ExtractedField = {

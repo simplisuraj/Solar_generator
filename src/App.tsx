@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Navbar } from './components/Navbar';
 import { WorkflowSteps } from './components/WorkflowSteps';
 import { Step1Upload } from './components/Step1Upload';
@@ -72,6 +72,10 @@ export function App() {
   const [caseId, setCaseId] = useState<string>('CASE-2024-KUSUM-001');
   const [files, setFiles] = useState<IngestedFile[]>([]);
   const [documents, setDocuments] = useState<DocumentCaseItem[]>([]);
+  // Parsing runs asynchronously and may process many pages in sequence. Keep the
+  // latest document snapshot outside React's render cycle so a later page does
+  // not overwrite results saved for an earlier page.
+  const documentsRef = useRef<DocumentCaseItem[]>([]);
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
 
   // Appraisal State
@@ -90,6 +94,11 @@ export function App() {
   // Modal State
   const [selectedFieldDetail, setSelectedFieldDetail] = useState<ExtractedField | null>(null);
   const [selectedSections, setSelectedSections] = useState<string[]>(SECTION_ORDER);
+
+  const replaceDocuments = (nextDocuments: DocumentCaseItem[]) => {
+    documentsRef.current = nextDocuments;
+    setDocuments(nextDocuments);
+  };
 
   // Helper to log audit actions
   const logAudit = (
@@ -168,7 +177,7 @@ export function App() {
       return doc;
     });
 
-    setDocuments(caseDocs);
+    replaceDocuments(caseDocs);
     setSelectedDocId(caseDocs[0]?.id || null);
 
     // Initialize blank dictionary fields with all required properties
@@ -206,7 +215,7 @@ export function App() {
   // Reset workspace
   const handleReset = () => {
     setFiles([]);
-    setDocuments([]);
+    replaceDocuments([]);
     setSelectedDocId(null);
     setClassifiedDocs([]);
     setStageInfo(null);
@@ -229,7 +238,7 @@ export function App() {
       return createDocumentCaseItem(file, pageCount);
     });
 
-    setDocuments(newDocs);
+    replaceDocuments(newDocs);
     if (newDocs.length > 0 && !selectedDocId) {
       setSelectedDocId(newDocs[0].id);
     }
@@ -239,7 +248,7 @@ export function App() {
 
   // Parse a single page with LED tracker
   const handleParsePage = async (docId: string, pageNum: number) => {
-    const doc = documents.find((d) => d.id === docId);
+    const doc = documentsRef.current.find((d) => d.id === docId);
     if (!doc) return;
 
     setActiveProcessingPage({ docId, page: pageNum });
@@ -251,8 +260,8 @@ export function App() {
     });
 
     // Update document state
-    setDocuments((prev) =>
-      prev.map((d) => (d.id === docId ? parseResult.updatedDoc : d))
+    replaceDocuments(
+      documentsRef.current.map((d) => (d.id === docId ? parseResult.updatedDoc : d))
     );
 
     setActiveProcessingPage(null);
@@ -267,7 +276,7 @@ export function App() {
 
   // Retry only failed pages for a document
   const handleRetryFailedPages = async (docId: string) => {
-    const doc = documents.find((d) => d.id === docId);
+    const doc = documentsRef.current.find((d) => d.id === docId);
     if (!doc) return;
 
     const failedPages = doc.pages.filter((p) => p.status === 'FAILED');
@@ -282,7 +291,7 @@ export function App() {
 
   // Reprocess all pages for a document
   const handleReprocessAllPages = async (docId: string) => {
-    const doc = documents.find((d) => d.id === docId);
+    const doc = documentsRef.current.find((d) => d.id === docId);
     if (!doc) return;
 
     setIsProcessing(true);
@@ -299,7 +308,7 @@ export function App() {
     setIsProcessing(true);
     logAudit('PAGE_STARTED', `Batch parsing all ${documents.length} ingested documents`);
 
-    for (const doc of documents) {
+    for (const doc of documentsRef.current) {
       for (let p = 1; p <= doc.total_pages; p++) {
         const existingPage = doc.pages.find((page) => page.page === p);
         if (!existingPage || existingPage.status !== 'SUCCESS') {
