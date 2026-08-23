@@ -79,6 +79,13 @@ export function App() {
     abortController: null
   });
 
+  // Ref mirror of `documents` so the worker can read the latest state
+  // without depending on a stale closure.
+  const documentsRef = useRef<DocumentCaseItem[]>([]);
+  useEffect(() => {
+    documentsRef.current = documents;
+  }, [documents]);
+
   // Appraisal State
   const [classifiedDocs, setClassifiedDocs] = useState<ClassifiedDocument[]>([]);
   const [stageInfo, setStageInfo] = useState<ProjectStageInfo | null>(null);
@@ -252,8 +259,8 @@ export function App() {
 
     setActiveProcessingPage({ docId, page: pageNum });
 
-    const currentDoc = doc || documents.find((d) => d.id === docId);
-    const docForLog = currentDoc || documents.find((d) => d.id === docId);
+    const currentDoc = doc || documentsRef.current.find((d) => d.id === docId);
+    const docForLog = currentDoc || documentsRef.current.find((d) => d.id === docId);
     logAudit('PAGE_STARTED', `Parsing page ${pageNum} via ${settings.defaultParser}`, docId, docForLog?.filename, pageNum);
 
     let parseResult;
@@ -300,7 +307,7 @@ export function App() {
       docForLog?.filename,
       pageNum
     );
-  }, [documents, settings.defaultParser, settings.useOCRForScanned, logAudit, setDocuments, setActiveProcessingPage]);
+  }, [settings.defaultParser, settings.useOCRForScanned, logAudit, setDocuments, setActiveProcessingPage]);
 
   // Single worker loop that claims QUEUED pages one by one
   const runWorker = useCallback(async (
@@ -320,25 +327,16 @@ export function App() {
     try {
       for (const docId of docIds) {
         if (controller.signal.aborted) break;
-        let docPages: PageMetadata[] = [];
-        let docName = '';
-        let totalPages = 0;
-        let currentDoc: DocumentCaseItem | undefined;
 
-        setDocuments((prev) => {
-          const doc = prev.find((d) => d.id === docId);
-          if (!doc) return prev;
-          currentDoc = doc;
-          docPages = pageSelector(doc);
-          docName = doc.filename;
-          totalPages = doc.total_pages;
-          return prev;
-        });
+        const docs = documentsRef.current;
+        const doc = docs.find((d) => d.id === docId);
+        if (!doc) continue;
 
+        const docPages = pageSelector(doc);
         for (const page of docPages) {
           if (controller.signal.aborted) break;
           if (page.status === 'SUCCESS') continue;
-          await handleParsePage(docId, page.page, currentDoc);
+          await handleParsePage(docId, page.page, doc);
         }
       }
     } finally {
@@ -350,7 +348,7 @@ export function App() {
 
   // Retry only failed pages for a document
   const handleRetryFailedPages = useCallback(async (docId: string) => {
-    const doc = documents.find((d) => d.id === docId);
+    const doc = documentsRef.current.find((d) => d.id === docId);
     if (!doc) return;
     const failedPages = doc.pages.filter((p) => p.status === 'FAILED');
     logAudit('PAGE_RETRIED', `Retrying ${failedPages.length} failed pages`, docId, doc.filename);
@@ -359,11 +357,11 @@ export function App() {
       (doc) => doc.pages.filter((p) => p.status === 'FAILED'),
       () => {}
     );
-  }, [documents, logAudit, runWorker]);
+  }, [logAudit, runWorker]);
 
   // Reprocess all pages for a document
   const handleReprocessAllPages = useCallback(async (docId: string) => {
-    const doc = documents.find((d) => d.id === docId);
+    const doc = documentsRef.current.find((d) => d.id === docId);
     if (!doc) return;
     logAudit('PAGE_STARTED', `Reprocessing all ${doc.total_pages} pages`, docId, doc.filename);
     await runWorker(
@@ -371,23 +369,24 @@ export function App() {
       (doc) => doc.pages,
       () => {}
     );
-  }, [documents, logAudit, runWorker]);
+  }, [logAudit, runWorker]);
 
   // Parse all ingested documents across entire dossier
   const handleParseAllDocuments = useCallback(async () => {
-    logAudit('PAGE_STARTED', `Batch parsing all ${documents.length} ingested documents`);
+    const docs = documentsRef.current;
+    logAudit('PAGE_STARTED', `Batch parsing all ${docs.length} ingested documents`);
     await runWorker(
-      documents.map((d) => d.id),
+      docs.map((d) => d.id),
       (doc) => doc.pages,
       () => {}
     );
-  }, [documents, logAudit, runWorker]);
+  }, [logAudit, runWorker]);
 
   const handleProceedToParsing = useCallback(async () => {
-    if (documents.length === 0) return;
+    if (documentsRef.current.length === 0) return;
     handleParseAllDocuments().catch((e) => console.warn('Parse error:', e));
     setActiveTab('parsing_monitor');
-  }, [documents.length, handleParseAllDocuments, setActiveTab]);
+  }, [handleParseAllDocuments, setActiveTab]);
 
   // Execute Step 2: Document Intelligence
   const handleRunClassification = async () => {
