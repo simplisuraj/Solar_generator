@@ -130,32 +130,6 @@ export class LlamaIndexDocumentParser implements DocumentParser {
     let raw = params.pageRawText || '';
     const hasSearchable = raw.trim().length > 15;
 
-    // For scanned pages (no text layer) of a PDF we still have on disk,
-    // render the page image via the Python backend so the AI parser can
-    // transcribe it with vision instead of returning an empty page.
-    let pageImage: { data: string; mimeType: string } | null = null;
-    if (!hasSearchable && params.rawSourceFile instanceof Blob) {
-      try {
-        const buf = await params.rawSourceFile.arrayBuffer();
-        const imgResp = await fetch('/api/pdf/page-image', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/pdf',
-            'x-page-number': String(params.pageNumber)
-          },
-          body: buf
-        });
-        if (imgResp.ok) {
-          const imgData = await imgResp.json();
-          if (imgData && imgData.imageBase64) {
-            pageImage = { data: imgData.imageBase64, mimeType: imgData.mimeType || 'image/png' };
-          }
-        }
-      } catch (e) {
-        console.warn('[PageParser] page-image render failed, continuing without vision input:', e);
-      }
-    }
-
     // First attempt real server-side API call to structure page markdown
     try {
       const resp = await fetch('/api/gemini/parse-page', {
@@ -167,8 +141,7 @@ export class LlamaIndexDocumentParser implements DocumentParser {
           page_number: params.pageNumber,
           total_pages: params.totalPages,
           raw_text: raw,
-          use_ocr: params.useOCR,
-          page_image: pageImage
+          use_ocr: params.useOCR
         })
       });
 

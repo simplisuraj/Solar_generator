@@ -51,6 +51,40 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def split_pdf_single_pages(data: bytes) -> list:
+    """Split a PDF into single-page PDF bytes, preserving page order."""
+    src = pdfium.PdfDocument(io.BytesIO(data))
+    try:
+        single_page_pdfs = []
+        for i in range(len(src)):
+            dst = pdfium.PdfDocument.new()
+            dst.import_pages(src, pages=[i])
+            buf = io.BytesIO()
+            dst.save(buf)
+            dst.close()
+            single_page_pdfs.append(buf.getvalue())
+        return single_page_pdfs
+    finally:
+        src.close()
+
+
+def _local_pdf_pages(pdf) -> list:
+    """Local pypdfium2 extraction; returns list of (text, scanned_flag)."""
+    out = []
+    for i in range(len(pdf)):
+        page = pdf[i]
+        text = ""
+        try:
+            text_page = page.get_textpage()
+            text = _clean_text(text_page.get_text_bounded()) or ""
+            text_page.close()
+        except Exception:
+            text = ""
+        out.append((text, len(text) < MIN_TEXT_CHARS))
+        page.close()
+    return out
+
+
 LLAMA_CONCURRENCY = int(os.environ.get("LLAMA_CONCURRENCY", "5"))
 
 
@@ -154,8 +188,9 @@ def parse_pdf_with_page_cache(data: bytes, filename: str, page_count: int):
     """
     cache = _cache_dir(_file_hash(data))
     cached = _read_cached_pages(cache, page_count)
-    cached_count = sum(1 for md in cached if md)
-    already_complete = all(md is not None and os.path.exists(_page_cache_path(cache, i + 1)) for i, md in enumerate(cached))
+    # A page counts as cached when its .md file exists on disk (even if the
+    # extracted markdown is empty for a blank/scanned page)
+    cached_count = sum(1 for i in range(page_count) if os.path.exists(_page_cache_path(cache, i + 1)))
 
     # Fast path: fully cached document — zero API calls
     if all(os.path.exists(_page_cache_path(cache, i + 1)) for i in range(page_count)):

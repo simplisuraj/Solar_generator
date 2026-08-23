@@ -149,38 +149,6 @@ async function generateTextContent(
   return fallbackText;
 }
 
-// Vision-capable generation: sends a page image so scanned documents can be
-// transcribed into structured Markdown by Ox Alpha. If Ox Alpha's provider
-// returns no content for images, fall back to a vision-capable OCR model.
-const OXALPHA_VISION_FALLBACK_MODEL = process.env.OXALPHA_VISION_FALLBACK_MODEL || 'dots-studio/dots-3-note-preview:free';
-
-async function generateVisionTextContent(
-  prompt: string,
-  imageBase64: string,
-  imageMimeType: string
-): Promise<string | null> {
-  if (!hasOxAlphaKey()) return null;
-
-  const dataUrl = `data:${imageMimeType};base64,${imageBase64}`;
-  const messages: OxAlphaMessage[] = [
-    {
-      role: 'user',
-      content: [
-        { type: 'image_url', image_url: { url: dataUrl } },
-        { type: 'text', text: prompt }
-      ]
-    }
-  ];
-
-  // Primary: Ox Alpha
-  const primary = await oxAlphaChat(messages);
-  if (primary && primary.trim()) return primary;
-
-  // Fallback: dedicated vision/OCR model for scanned-page transcription
-  console.warn(`[Ox Alpha] Empty vision output; falling back to ${OXALPHA_VISION_FALLBACK_MODEL}`);
-  return await oxAlphaChat(messages, { model: OXALPHA_VISION_FALLBACK_MODEL });
-}
-
 // Health Check
 app.get('/api/health', (req, res) => {
   res.json({
@@ -254,51 +222,9 @@ app.post('/api/pdf/page-image', express.raw({ type: '*/*', limit: '100mb' }) as 
 });
 
 // 0. Page-Level Markdown Parser Endpoint (Structures tables, clauses, and headers)
+// Scanned pages are handled by LlamaParse in the Python service; no AI OCR here.
 app.post('/api/gemini/parse-page', async (req, res) => {
-  const { document_id, filename, page_number, total_pages, raw_text, use_ocr, page_image } = req.body;
-
-  // Scanned page: no text layer but an AI parser image is available.
-  if ((!raw_text || !raw_text.trim()) && page_image && page_image.data) {
-    if (!hasOxAlphaKey()) {
-      return res.json({
-        markdown: `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "ox_alpha_vision"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n[Scanned page — OPENROUTER_API_KEY not configured on server for AI OCR parsing]`,
-        parser: 'ox_alpha_vision'
-      });
-    }
-
-    try {
-      const visionPrompt = `You are a specialized financial document page parser for Indian credit appraisal.
-This is a scanned page (image) — page ${page_number} of "${filename}". Transcribe ALL visible content into clean, structured Markdown.
-Rules:
-1. Preserve every table using Markdown tables (| Col 1 | Col 2 |).
-2. Retain all legal clauses, headers (## Article X), stamps, signatures blocks and numerical values (INR Lakhs, MW, %, dates) with 100% precision.
-3. Transcribe exactly what is visible. Do not invent or omit content.
-4. If parts are illegible, mark them as [illegible].
-5. Output ONLY the Markdown body without enclosing code fences.`;
-
-      const mdBody = await generateVisionTextContent(visionPrompt, page_image.data, page_image.mimeType || 'image/png');
-      const parsedBody = ((mdBody || '[AI parser could not transcribe this scanned page]').trim())
-        .replace(/^```markdown\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
-      const header = [
-        '---',
-        `document_id: ${document_id || 'doc'}`,
-        `source_file: "${filename || 'unknown'}"`,
-        `page_number: ${page_number || 1}`,
-        `total_pages: ${total_pages || 1}`,
-        `parser: "ox_alpha_vision_scanned"`,
-        `processed_at: "${new Date().toISOString()}"`,
-        '---',
-        '',
-        `# Page ${page_number || 1}`,
-        '',
-        parsedBody
-      ].join('\n');
-
-      return res.json({ markdown: header, parser: 'ox_alpha_vision_scanned' });
-    } catch (err) {
-      console.warn('[Gemini API] scanned-page parse failed:', err);
-    }
-  }
+  const { document_id, filename, page_number, total_pages, raw_text, use_ocr } = req.body;
 
   if (!raw_text || !raw_text.trim()) {
     return res.json({
