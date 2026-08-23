@@ -4,25 +4,20 @@ import {
   Upload,
   FileText,
   FileCode,
-  FileCheck2,
   Trash2,
   Eye,
   Plus,
-  Sparkles,
   ArrowRight,
-  FolderOpen,
   CheckCircle,
   AlertCircle
 } from 'lucide-react';
 import { IngestedFile } from '../types';
-import { SAMPLE_PROJECTS } from '../data/sampleProjects';
 import { calculateAccuratePageCount } from '../lib/pageParserEngine';
 
 interface Step1UploadProps {
   files: IngestedFile[];
   onFilesChange: (files: IngestedFile[]) => void;
   onNext: () => void;
-  onLoadSample: (sampleId: string) => void;
   isProcessing: boolean;
   useOCR: boolean;
   onToggleOCR: (enabled: boolean) => void;
@@ -32,12 +27,11 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
   files,
   onFilesChange,
   onNext,
-  onLoadSample,
   isProcessing,
   useOCR,
   onToggleOCR,
 }) => {
-  const [activeTab, setActiveTab] = useState<'upload' | 'paste' | 'samples'>('samples');
+  const [activeTab, setActiveTab] = useState<'upload' | 'paste'>('upload');
   const [pastedTitle, setPastedTitle] = useState('');
   const [pastedText, setPastedText] = useState('');
   const [previewFile, setPreviewFile] = useState<IngestedFile | null>(null);
@@ -110,7 +104,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
             </h2>
           </div>
           <p className="text-sm text-slate-600 mt-1 max-w-2xl">
-            Upload loan applications, executed PPAs, LOAs, Chartered Accountant cost certificates, DPR, PVSyst simulation reports, CEIG approvals, or select a pre-loaded bank appraisal.
+            Upload loan applications, executed PPAs, LOAs, Chartered Accountant cost certificates, DPR, PVSyst simulation reports, CEIG approvals, and other project documents.
           </p>
         </div>
 
@@ -130,16 +124,6 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
 
       {/* Tabs */}
       <div className="flex border-b border-slate-200 gap-6">
-        <button
-          onClick={() => setActiveTab('samples')}
-          className={`pb-3 font-semibold text-xs uppercase tracking-wider flex items-center gap-2 border-b-2 transition-colors cursor-pointer ${
-            activeTab === 'samples'
-              ? 'border-indigo-600 text-indigo-600'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <FolderOpen className="w-4 h-4" /> Ready-to-Test Sample Dossiers
-        </button>
         <button
           onClick={() => setActiveTab('upload')}
           className={`pb-3 font-semibold text-xs uppercase tracking-wider flex items-center gap-2 border-b-2 transition-colors cursor-pointer ${
@@ -162,49 +146,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
         </button>
       </div>
 
-      {/* Tab 1: Sample Projects */}
-      {activeTab === 'samples' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {SAMPLE_PROJECTS.map((sample) => (
-            <div
-              key={sample.id}
-              className="bg-white p-5 rounded-xl border border-slate-200 hover:border-indigo-500/50 hover:shadow-md transition-all flex flex-col justify-between"
-            >
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-100">
-                    {sample.category}
-                  </span>
-                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">
-                    {sample.stage}
-                  </span>
-                </div>
-                <h3 className="font-bold text-slate-900 text-base">{sample.name}</h3>
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">{sample.description}</p>
-                <div className="mt-3 flex items-center gap-2 text-xs text-slate-600 font-medium">
-                  <FileCheck2 className="w-4 h-4 text-indigo-600" />
-                  <span>{sample.files.length} authentic project documents pre-packaged</span>
-                </div>
-              </div>
-
-              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
-                <span className="text-xs text-slate-500 font-mono font-medium">
-                  Capacity: {sample.capacity}
-                </span>
-                <button
-                  onClick={() => onLoadSample(sample.id)}
-                  disabled={isProcessing}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold px-4 py-1.5 rounded-md shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Sparkles className="w-3.5 h-3.5" /> Load Dossier
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Tab 2: Upload Files */}
+      {/* Tab: Upload Files */}
       {activeTab === 'upload' && (
         <div className="bg-white p-8 rounded-xl border-2 border-dashed border-slate-300 hover:border-indigo-500 transition-colors text-center shadow-xs">
           <input
@@ -232,7 +174,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
         </div>
       )}
 
-      {/* Tab 3: Paste Text */}
+      {/* Tab: Paste Text */}
       {activeTab === 'paste' && (
         <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
           <div>

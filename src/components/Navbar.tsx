@@ -3,7 +3,6 @@ import {
   ShieldCheck,
   Cpu,
   Sparkles,
-  FolderOpen,
   RefreshCw,
   Sliders,
   History,
@@ -11,12 +10,10 @@ import {
   Layers,
   Activity
 } from 'lucide-react';
-import { SAMPLE_PROJECTS } from '../data/sampleProjects';
 import { ActiveViewTab, OperatingMode } from '../types';
 
 interface NavbarProps {
   hasGeminiKey: boolean;
-  onLoadSample: (sampleId: string) => void;
   onReset: () => void;
   isProcessing: boolean;
   activeTab: ActiveViewTab;
@@ -28,7 +25,6 @@ interface NavbarProps {
 
 export const Navbar: React.FC<NavbarProps> = ({
   hasGeminiKey,
-  onLoadSample,
   onReset,
   isProcessing,
   activeTab,
@@ -89,26 +85,6 @@ export const Navbar: React.FC<NavbarProps> = ({
               Demo Mode
             </button>
           </div>
-
-          {/* Quick Sample Selector (Visible only in Demo mode) */}
-          {operatingMode === 'demo' && (
-            <div className="hidden lg:flex items-center space-x-1.5 bg-slate-800/90 p-1 rounded-md border border-slate-700/80">
-              <span className="text-[11px] text-amber-300 px-2 flex items-center gap-1 font-medium">
-                <FolderOpen className="w-3.5 h-3.5" /> Dossier:
-              </span>
-              {SAMPLE_PROJECTS.map((sample) => (
-                <button
-                  key={sample.id}
-                  onClick={() => onLoadSample(sample.id)}
-                  disabled={isProcessing}
-                  className="text-xs bg-slate-700/70 hover:bg-indigo-600 text-slate-200 hover:text-white px-2 py-0.5 rounded transition-colors font-medium cursor-pointer"
-                  title={sample.description}
-                >
-                  {sample.id === 'hg_badu_kusum' ? 'HG Badu 2.5 MW' : 'Bikaner 50 MW'}
-                </button>
-              ))}
-            </div>
-          )}
 
           {/* Quick Access to Export Centre & Audit Log */}
           <button

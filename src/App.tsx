@@ -31,7 +31,6 @@ import {
 
 import { DATA_DICTIONARY, SECTION_ORDER } from './data/dataDictionary';
 import { DOCUMENT_CHECKLIST } from './data/documentChecklist';
-import { SAMPLE_PROJECTS } from './data/sampleProjects';
 import { evaluateValidationRules } from './lib/validationEngine';
 import {
   parseSinglePage,
@@ -122,8 +121,8 @@ export function App() {
       })
       .catch((err) => console.warn('Health check not available:', err));
 
-    // Load initial sample in Demo mode
-    handleLoadSample('hg_badu_kusum');
+    // Initialize a blank workspace on mount
+    initializeBlankWorkspace();
   }, []);
 
   // Update validation rules whenever fields change or documents change
@@ -132,46 +131,8 @@ export function App() {
     setChecks(results);
   }, [fields, documents]);
 
-  // Load a sample project dossier
-  const handleLoadSample = (sampleId: string) => {
-    const sample = SAMPLE_PROJECTS.find((p) => p.id === sampleId) || SAMPLE_PROJECTS[0];
-    setFiles(sample.files);
-
-    // Convert sample files to DocumentCaseItems with true accurate page count and page chunks
-    const caseDocs: DocumentCaseItem[] = sample.files.map((file) => {
-      const pageCount = file.pageCount || calculateAccuratePageCount(file);
-      const doc = createDocumentCaseItem(file, pageCount);
-      const chunks = splitTextIntoPageChunks(file.text, pageCount);
-
-      for (let p = 1; p <= doc.total_pages; p++) {
-        const pText = chunks[p - 1] || '';
-        doc.page_markdowns[p] = formatPageMarkdown(
-          doc.id,
-          file.name,
-          p,
-          doc.total_pages,
-          pText,
-          'llamaindex_native'
-        );
-        if (doc.pages[p - 1]) {
-          doc.pages[p - 1].status = 'SUCCESS';
-          doc.pages[p - 1].char_count = doc.page_markdowns[p].length;
-          doc.pages[p - 1].processing_time_seconds = 0.35;
-          doc.pages[p - 1].parser = 'llamaindex_native';
-        }
-      }
-      doc.status = 'READY_FOR_EXTRACTION';
-      const stitched = stitchDocumentMarkdown(doc);
-      doc.stitched_markdown = stitched.stitchedMarkdown;
-      doc.is_stitched_complete = true;
-      doc.missing_pages = [];
-      return doc;
-    });
-
-    setDocuments(caseDocs);
-    setSelectedDocId(caseDocs[0]?.id || null);
-
-    // Initialize blank dictionary fields with all required properties
+  // Initialize blank dictionary fields with all required properties
+  const initializeBlankWorkspace = () => {
     const initialFields: ExtractedField[] = DATA_DICTIONARY.map((def) => ({
       field_id: def['Field ID'],
       field_name: def['Field / Label'],
@@ -191,16 +152,7 @@ export function App() {
       extraction_method: 'gemini_markdown',
       review_required: false
     }));
-
     setFields(initialFields);
-    setClassifiedDocs([]);
-    setStageInfo(null);
-    setChecklistRows([]);
-    setReconciliations([]);
-    setPatches([]);
-    setPatchResults(null);
-
-    logAudit('DEMO_LOADED', `Loaded sample dossier: ${sample.name}`);
   };
 
   // Reset workspace
@@ -551,7 +503,6 @@ export function App() {
       {/* Top Navbar with Mode Switch & Status */}
       <Navbar
         hasGeminiKey={hasGeminiKey}
-        onLoadSample={handleLoadSample}
         onReset={handleReset}
         isProcessing={isProcessing}
         activeTab={activeTab}
@@ -576,7 +527,6 @@ export function App() {
             files={files}
             onFilesChange={handleFilesChange}
             onNext={() => setActiveTab('parsing_monitor')}
-            onLoadSample={handleLoadSample}
             isProcessing={isProcessing}
             useOCR={settings.useOCRForScanned}
             onToggleOCR={(enabled) =>
