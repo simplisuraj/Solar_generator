@@ -3,10 +3,8 @@ import JSZip from 'jszip';
 import {
   Upload,
   FileText,
-  FileCode,
   Trash2,
   Eye,
-  Plus,
   ArrowRight,
   CheckCircle,
   AlertCircle
@@ -31,9 +29,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
   useOCR,
   onToggleOCR,
 }) => {
-  const [activeTab, setActiveTab] = useState<'upload' | 'paste'>('upload');
-  const [pastedTitle, setPastedTitle] = useState('');
-  const [pastedText, setPastedText] = useState('');
+  const [activeTab, setActiveTab] = useState<'upload'>('upload');
   const [previewFile, setPreviewFile] = useState<IngestedFile | null>(null);
 
   // File Upload Handler
@@ -46,7 +42,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
     for (let i = 0; i < uploadedFiles.length; i++) {
       const file = uploadedFiles[i];
       const lower = file.name.toLowerCase();
-      const { text, pageCount } = await parseUploadedFile(file, useOCR);
+      const { text, pageCount } = await parseUploadedFile(file, false);
       const parserMethod = getParserMethod(file.name, useOCR);
 
       newFiles.push({
@@ -64,25 +60,6 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
 
     onFilesChange([...files, ...newFiles]);
     event.target.value = '';
-  };
-
-  const handleAddPastedText = () => {
-    if (!pastedText.trim()) return;
-    const name = pastedTitle.trim() || `Manual_Pasted_Doc_${files.length + 1}.txt`;
-    const pageCount = calculateAccuratePageCount({ name, text: pastedText });
-    const newFile: IngestedFile = {
-      name,
-      type: 'text/plain',
-      size: new Blob([pastedText]).size,
-      text: pastedText,
-      parserMethod: 'Text / Markdown parser',
-      charCount: pastedText.length,
-      pageCount: pageCount,
-      uploadedAt: new Date().toISOString(),
-    };
-    onFilesChange([...files, newFile]);
-    setPastedTitle('');
-    setPastedText('');
   };
 
   const handleRemoveFile = (index: number) => {
@@ -109,6 +86,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
             Upload loan applications, executed PPAs, LOAs, Chartered Accountant cost certificates, DPR, PVSyst simulation reports, CEIG approvals, and other project documents.
           </p>
         </div>
+      </div>
 
       {/* Tabs */}
       <div className="flex border-b border-slate-200 gap-6">
@@ -121,16 +99,6 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
           }`}
         >
           <Upload className="w-4 h-4" /> Upload Files (.pdf, .docx, .json, .txt)
-        </button>
-        <button
-          onClick={() => setActiveTab('paste')}
-          className={`pb-3 font-semibold text-xs uppercase tracking-wider flex items-center gap-2 border-b-2 transition-colors cursor-pointer ${
-            activeTab === 'paste'
-              ? 'border-indigo-600 text-indigo-600'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <FileCode className="w-4 h-4" /> Paste Text / Key Clauses
         </button>
       </div>
 
@@ -159,43 +127,6 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               Browse Local Files
             </span>
           </label>
-        </div>
-      )}
-
-      {/* Tab: Paste Text */}
-      {activeTab === 'paste' && (
-        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-              Document Title / Citation
-            </label>
-            <input
-              type="text"
-              placeholder="e.g. Executed_PPA_Clause_Extract.txt"
-              value={pastedTitle}
-              onChange={(e) => setPastedTitle(e.target.value)}
-              className="w-full text-xs p-2.5 bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-              Source Text (include [PDF page 1] or [Clause 4.1] tags)
-            </label>
-            <textarea
-              rows={6}
-              placeholder="Paste raw agreement clauses, loan sanction notes, or technical specifications..."
-              value={pastedText}
-              onChange={(e) => setPastedText(e.target.value)}
-              className="w-full font-mono text-xs p-3 bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all"
-            />
-          </div>
-          <button
-            onClick={handleAddPastedText}
-            disabled={!pastedText.trim()}
-            className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-md shadow-xs flex items-center gap-1.5 cursor-pointer"
-          >
-            <Plus className="w-4 h-4" /> Add to Intake Portfolio
-          </button>
         </div>
       )}
 

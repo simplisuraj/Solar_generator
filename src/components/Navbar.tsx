@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   Sparkles,
-  RefreshCw,
   Sliders,
   History,
   Archive
@@ -9,21 +8,13 @@ import {
 import { ActiveViewTab } from '../types';
 
 interface NavbarProps {
-  hasGeminiKey: boolean;
-  onReset: () => void;
-  isProcessing: boolean;
   activeTab: ActiveViewTab;
   onSelectTab: (tab: ActiveViewTab) => void;
-  totalParsedPct: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
-  hasGeminiKey,
-  onReset,
-  isProcessing,
   activeTab,
-  onSelectTab,
-  totalParsedPct
+  onSelectTab
 }) => {
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-40 shadow-sm">
@@ -50,7 +41,6 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Center/Right: Navigation Shortcuts */}
         <div className="flex items-center space-x-2.5">
-          {/* Quick Access to Export Centre & Audit Log */}
           <button
             onClick={() => onSelectTab('export_centre')}
             className={`p-1.5 rounded-md text-xs font-medium flex items-center gap-1 border transition cursor-pointer ${
@@ -87,28 +77,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             title="Parser Settings"
           >
             <Sliders className="w-4 h-4" />
-          </button>
-
-          {/* AI Engine Status */}
-          <div className="flex items-center space-x-1.5 bg-slate-800/90 px-2.5 py-1.5 rounded-md border border-slate-700/80 text-xs">
-            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-slate-300 font-medium hidden sm:inline">Gemini 3.7</span>
-            <span
-              className={`w-2 h-2 rounded-full ${
-                hasGeminiKey ? 'bg-emerald-400 ring-2 ring-emerald-400/20' : 'bg-indigo-400 ring-2 ring-indigo-400/20'
-              }`}
-              title={hasGeminiKey ? 'Gemini API Key Connected' : 'Auto Local / Server Engine active'}
-            />
-          </div>
-
-          {/* Reset button */}
-          <button
-            onClick={onReset}
-            disabled={isProcessing}
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-md transition-colors cursor-pointer"
-            title="Reset Workspace"
-          >
-            <RefreshCw className={`w-4 h-4 ${isProcessing ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
