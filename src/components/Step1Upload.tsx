@@ -110,20 +110,6 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
           </p>
         </div>
 
-        {/* OCR Toggle & Quick Stats */}
-        <div className="flex items-center gap-4 bg-slate-50 p-3 rounded-lg border border-slate-200 shadow-2xs">
-          <label className="flex items-center space-x-2 text-xs font-medium text-slate-700 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={useOCR}
-              onChange={(e) => onToggleOCR(e.target.checked)}
-              className="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4"
-            />
-            <span>OCR Scanned PDFs & Certificates</span>
-          </label>
-        </div>
-      </div>
-
       {/* Tabs */}
       <div className="flex border-b border-slate-200 gap-6">
         <button
@@ -288,9 +274,6 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
 
           {/* Action Footer */}
           <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
-            <span className="text-xs text-slate-500">
-              All documents ready for Gemini document intelligence & gap analysis.
-            </span>
             <button
               onClick={onNext}
               disabled={files.length === 0 || isProcessing}
