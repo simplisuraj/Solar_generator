@@ -447,6 +447,7 @@ export async function parseSinglePage(
     parser?: DocumentParser;
     useOCR?: boolean;
     simulateFailure?: boolean;
+    rawSourceFile?: Blob | null;
   } = {}
 ): Promise<{
   updatedDoc: DocumentCaseItem;

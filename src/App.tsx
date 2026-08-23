@@ -50,7 +50,7 @@ import {
 } from './lib/clientEngine';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<ActiveViewTab>('parsing_monitor');
+  const [activeTab, setActiveTab] = useState<ActiveViewTab>('documents');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [hasGeminiKey, setHasGeminiKey] = useState<boolean>(false);
   const [activeProcessingPage, setActiveProcessingPage] = useState<{
@@ -231,15 +231,15 @@ export function App() {
   };
 
   // Parse a single page with LED tracker
-  const handleParsePage = useCallback(async (docId: string, pageNum: number) => {
+  const handleParsePage = useCallback(async (docId: string, pageNum: number, doc?: DocumentCaseItem) => {
     setDocuments((prev) => {
-      const doc = prev.find((d) => d.id === docId);
-      if (!doc) return prev;
-      const pageIdx = doc.pages.findIndex((p) => p.page === pageNum);
+      const d = prev.find((d) => d.id === docId);
+      if (!d) return prev;
+      const pageIdx = d.pages.findIndex((p) => p.page === pageNum);
       if (pageIdx === -1) return prev;
-      const existing = doc.pages[pageIdx];
+      const existing = d.pages[pageIdx];
       if (existing.status === 'SUCCESS') return prev;
-      const newPages = [...doc.pages];
+      const newPages = [...d.pages];
       newPages[pageIdx] = {
         ...existing,
         status: 'PROCESSING',
@@ -252,26 +252,27 @@ export function App() {
 
     setActiveProcessingPage({ docId, page: pageNum });
 
-    const docForLog = documents.find((d) => d.id === docId);
+    const currentDoc = doc || documents.find((d) => d.id === docId);
+    const docForLog = currentDoc || documents.find((d) => d.id === docId);
     logAudit('PAGE_STARTED', `Parsing page ${pageNum} via ${settings.defaultParser}`, docId, docForLog?.filename, pageNum);
 
     let parseResult;
     try {
-      const doc = documents.find((d) => d.id === docId);
-      if (!doc) {
+      if (!currentDoc) {
         throw new Error(`Document ${docId} not found`);
       }
-      parseResult = await parseSinglePage(doc, pageNum, {
-        useOCR: settings.useOCRForScanned
+      parseResult = await parseSinglePage(currentDoc, pageNum, {
+        useOCR: settings.useOCRForScanned,
+        rawSourceFile: currentDoc.raw_source_file || null
       });
     } catch (e: any) {
       setDocuments((prev) => {
-        const doc = prev.find((d) => d.id === docId);
-        if (!doc) return prev;
-        const pageIdx = doc.pages.findIndex((p) => p.page === pageNum);
+        const d = prev.find((d) => d.id === docId);
+        if (!d) return prev;
+        const pageIdx = d.pages.findIndex((p) => p.page === pageNum);
         if (pageIdx === -1) return prev;
-        const existing = doc.pages[pageIdx];
-        const newPages = [...doc.pages];
+        const existing = d.pages[pageIdx];
+        const newPages = [...d.pages];
         newPages[pageIdx] = {
           ...existing,
           status: 'FAILED',
@@ -322,10 +323,12 @@ export function App() {
         let docPages: PageMetadata[] = [];
         let docName = '';
         let totalPages = 0;
+        let currentDoc: DocumentCaseItem | undefined;
 
         setDocuments((prev) => {
           const doc = prev.find((d) => d.id === docId);
           if (!doc) return prev;
+          currentDoc = doc;
           docPages = pageSelector(doc);
           docName = doc.filename;
           totalPages = doc.total_pages;
@@ -335,7 +338,7 @@ export function App() {
         for (const page of docPages) {
           if (controller.signal.aborted) break;
           if (page.status === 'SUCCESS') continue;
-          await handleParsePage(docId, page.page);
+          await handleParsePage(docId, page.page, currentDoc);
         }
       }
     } finally {
