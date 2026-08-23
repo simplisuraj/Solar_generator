@@ -44,7 +44,7 @@ interface OxAlphaMessage {
 
 async function oxAlphaChat(
   messages: OxAlphaMessage[],
-  opts: { jsonMode?: boolean; maxTokens?: number } = {}
+  opts: { jsonMode?: boolean; maxTokens?: number; model?: string } = {}
 ): Promise<string | null> {
   const apiKey = getOxAlphaKey();
   if (!apiKey) return null;
@@ -59,7 +59,7 @@ async function oxAlphaChat(
         'X-Title': 'Credit Appraisal Studio'
       },
       body: JSON.stringify({
-        model: OXALPHA_MODEL,
+        model: opts.model || OXALPHA_MODEL,
         messages,
         max_tokens: opts.maxTokens ?? 8192,
         ...(opts.jsonMode ? { response_format: { type: 'json_object' } } : {})
@@ -150,7 +150,10 @@ async function generateTextContent(
 }
 
 // Vision-capable generation: sends a page image so scanned documents can be
-// transcribed into structured Markdown by Ox Alpha.
+// transcribed into structured Markdown by Ox Alpha. If Ox Alpha's provider
+// returns no content for images, fall back to a vision-capable OCR model.
+const OXALPHA_VISION_FALLBACK_MODEL = process.env.OXALPHA_VISION_FALLBACK_MODEL || 'dots-studio/dots-3-note-preview:free';
+
 async function generateVisionTextContent(
   prompt: string,
   imageBase64: string,
@@ -159,7 +162,7 @@ async function generateVisionTextContent(
   if (!hasOxAlphaKey()) return null;
 
   const dataUrl = `data:${imageMimeType};base64,${imageBase64}`;
-  return await oxAlphaChat([
+  const messages: OxAlphaMessage[] = [
     {
       role: 'user',
       content: [
@@ -167,7 +170,15 @@ async function generateVisionTextContent(
         { type: 'text', text: prompt }
       ]
     }
-  ]);
+  ];
+
+  // Primary: Ox Alpha
+  const primary = await oxAlphaChat(messages);
+  if (primary && primary.trim()) return primary;
+
+  // Fallback: dedicated vision/OCR model for scanned-page transcription
+  console.warn(`[Ox Alpha] Empty vision output; falling back to ${OXALPHA_VISION_FALLBACK_MODEL}`);
+  return await oxAlphaChat(messages, { model: OXALPHA_VISION_FALLBACK_MODEL });
 }
 
 // Health Check
