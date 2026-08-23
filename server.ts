@@ -2,7 +2,15 @@ import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, Type } from '@google/genai';
+// Schema type shim — JSON Schema literals below stay readable
+const Type = {
+  OBJECT: 'object',
+  STRING: 'string',
+  NUMBER: 'number',
+  INTEGER: 'integer',
+  BOOLEAN: 'boolean',
+  ARRAY: 'array'
+} as const;
 
 dotenv.config();
 
