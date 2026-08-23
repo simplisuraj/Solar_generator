@@ -1,4 +1,4 @@
-export type PageStatus = 'QUEUED' | 'PROCESSING' | 'SUCCESS' | 'FAILED' | 'RETRYING' | 'SKIPPED';
+export type PageStatus = 'QUEUED' | 'PROCESSING' | 'SUCCESS' | 'FAILED';
 
 export type DocumentStatus =
   | 'NOT_UPLOADED'

@@ -26,7 +26,9 @@ for _env_path in (os.path.join(os.path.dirname(__file__), "..", ".env"), os.path
         pass
 
 import base64
+import hashlib
 import httpx
+import time
 
 import pypdfium2 as pdfium
 from fastapi import FastAPI, Request, UploadFile, File
@@ -126,6 +128,52 @@ def health():
     return {"ok": True, "service": "python-parser", "engine": "pypdfium2"}
 
 
+@app.get("/api/pdf/status")
+def pdf_status(request: Request):
+    """Return authoritative page statuses for a document hash (query param fileHash)."""
+    file_hash = request.query_params.get("fileHash", "")
+    if not file_hash:
+        return JSONResponse(status_code=400, content={"error": "fileHash required"})
+    cache = _cache_dir(file_hash)
+    if not os.path.isdir(cache):
+        return {"pages": [], "cached": 0, "total": 0}
+
+    entries = sorted(os.listdir(cache))
+    page_files = [e for e in entries if re.match(r"page-\d+\.md$", e)]
+    total = max(
+        [int(e.replace("page-", "").replace(".md", "")) for e in page_files] + [0]
+    )
+    pages = []
+    for i in range(1, total + 1):
+        md_path = _page_cache_path(cache, i)
+        lock_path = _lock_path(cache, i)
+        cached = os.path.exists(md_path)
+        locked = os.path.exists(lock_path)
+        status = "queued"
+        if cached:
+            status = "success"
+        elif locked:
+            now = time.time()
+            try:
+                with open(lock_path, "r") as f:
+                    created = float(f.read().strip())
+                if now - created > 300:
+                    status = "queued"
+                else:
+                    status = "processing"
+            except (ValueError, OSError):
+                status = "queued"
+        pages.append({"page": i, "status": status, "cached": cached})
+    stale = _stale_locks(cache)
+    return {
+        "fileHash": file_hash,
+        "total": total,
+        "cached": sum(1 for p in pages if p["cached"]),
+        "pages": pages,
+        "staleLockPages": stale,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Page-level Markdown cache: one .md file per page in a per-document folder.
 # Retrying a document skips every cached page to save LlamaParse credits;
@@ -138,7 +186,6 @@ CACHE_ROOT = os.environ.get(
 
 
 def _file_hash(data: bytes) -> str:
-    import hashlib
     return hashlib.sha256(data).hexdigest()[:16]
 
 
@@ -150,6 +197,58 @@ def _cache_dir(file_hash: str) -> str:
 
 def _page_cache_path(cache: str, page: int) -> str:
     return os.path.join(cache, f"page-{page}.md")
+
+
+def _lock_path(cache: str, page: int) -> str:
+    return os.path.join(cache, f"page-{page}.lock")
+
+
+def _acquire_lock(cache: str, page: int, ttl_seconds: int = 300) -> bool:
+    """Atomically create a lock file if none exists or if existing is stale."""
+    lock = _lock_path(cache, page)
+    now = time.time()
+    try:
+        if os.path.exists(lock):
+            with open(lock, "r") as f:
+                content = f.read().strip()
+            try:
+                created = float(content)
+                if now - created > ttl_seconds:
+                    os.remove(lock)
+                else:
+                    return False
+            except ValueError:
+                os.remove(lock)
+        with open(lock, "w") as f:
+            f.write(str(now))
+        return True
+    except OSError:
+        return False
+
+
+def _release_lock(cache: str, page: int) -> None:
+    try:
+        os.remove(_lock_path(cache, page))
+    except OSError:
+        pass
+
+
+def _stale_locks(cache: str, ttl_seconds: int = 300) -> list:
+    """Return page numbers whose lock files are stale."""
+    now = time.time()
+    stale = []
+    for entry in os.listdir(cache):
+        if entry.endswith(".lock"):
+            try:
+                page_num = int(entry.replace("page-", "").replace(".lock", ""))
+                lock_path = os.path.join(cache, entry)
+                with open(lock_path, "r") as f:
+                    created = float(f.read().strip())
+                if now - created > ttl_seconds:
+                    stale.append(page_num)
+            except (ValueError, OSError):
+                pass
+    return stale
 
 
 def _read_cached_pages(cache: str, page_count: int) -> list:
@@ -295,6 +394,7 @@ async def parse_single_page_pdf(request: Request):
     - Cache miss: splits out that single page, makes exactly one LlamaParse
       call, saves page-N.md
     - When the last page lands, stitches every page .md into final.md
+    - Lock files prevent duplicate concurrent processing of the same page
     """
     data = await request.body()
     if not data:
@@ -319,7 +419,37 @@ async def parse_single_page_pdf(request: Request):
         page_path = _page_cache_path(cache, page_number)
 
         cached = os.path.exists(page_path)
-        if not cached:
+        if cached:
+            with open(page_path, encoding="utf-8") as f:
+                markdown = f.read()
+            cached_pages = sum(
+                1 for i in range(1, page_count + 1) if os.path.exists(_page_cache_path(cache, i))
+            )
+            all_present = cached_pages == page_count
+            stitched = os.path.exists(os.path.join(cache, "final.md"))
+            return {
+                "fileName": filename,
+                "page": page_number,
+                "pageCount": page_count,
+                "markdown": markdown,
+                "cached": True,
+                "cachedPages": cached_pages,
+                "allPagesDone": all_present,
+                "stitched": stitched,
+            }
+
+        locked = _acquire_lock(cache, page_number)
+        if not locked:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "Page is currently being processed by another worker",
+                    "page": page_number,
+                    "status": "processing",
+                },
+            )
+
+        try:
             try:
                 page_pdfs = await _run_llama(split_pdf_single_pages, data)
                 client = _new_llama_client()
@@ -330,29 +460,31 @@ async def parse_single_page_pdf(request: Request):
             with open(page_path, "w", encoding="utf-8") as f:
                 f.write(md)
 
-        with open(page_path, encoding="utf-8") as f:
-            markdown = f.read()
+            with open(page_path, encoding="utf-8") as f:
+                markdown = f.read()
 
-        cached_pages = sum(
-            1 for i in range(1, page_count + 1) if os.path.exists(_page_cache_path(cache, i))
-        )
-        all_present = cached_pages == page_count
-        stitched = os.path.exists(os.path.join(cache, "final.md"))
-        if all_present and not stitched:
-            pages_md = _read_cached_pages(cache, page_count)
-            await _run_llama(_stitch_final_md, cache, filename, pages_md)
-            stitched = True
+            cached_pages = sum(
+                1 for i in range(1, page_count + 1) if os.path.exists(_page_cache_path(cache, i))
+            )
+            all_present = cached_pages == page_count
+            stitched = os.path.exists(os.path.join(cache, "final.md"))
+            if all_present and not stitched:
+                pages_md = _read_cached_pages(cache, page_count)
+                await _run_llama(_stitch_final_md, cache, filename, pages_md)
+                stitched = True
 
-        return {
-            "fileName": filename,
-            "page": page_number,
-            "pageCount": page_count,
-            "markdown": markdown,
-            "cached": cached,
-            "cachedPages": cached_pages,
-            "allPagesDone": all_present,
-            "stitched": stitched,
-        }
+            return {
+                "fileName": filename,
+                "page": page_number,
+                "pageCount": page_count,
+                "markdown": markdown,
+                "cached": False,
+                "cachedPages": cached_pages,
+                "allPagesDone": all_present,
+                "stitched": stitched,
+            }
+        finally:
+            _release_lock(cache, page_number)
     finally:
         pdf.close()
 

@@ -20,6 +20,18 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+const FETCH_TIMEOUT_MS = 120_000;
+
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 // Ox Alpha AI engine (OpenAI-compatible via OpenRouter)
 const OXALPHA_API_URL = process.env.OXALPHA_API_URL || 'https://openrouter.ai/api/v1/chat/completions';
 const OXALPHA_MODEL = process.env.OXALPHA_MODEL || 'stealth/ox-alpha';
@@ -50,7 +62,7 @@ async function oxAlphaChat(
   if (!apiKey) return null;
 
   try {
-    const response = await fetch(OXALPHA_API_URL, {
+    const response = await fetchWithTimeout(OXALPHA_API_URL, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${apiKey}`,
@@ -164,7 +176,7 @@ const PARSER_SERVICE_URL = process.env.PARSER_SERVICE_URL || 'http://127.0.0.1:3
 app.post('/api/pdf/inspect', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
   (async () => {
     try {
-      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/pdf/inspect`, {
+      const fetchRes = await fetchWithTimeout(`${PARSER_SERVICE_URL}/api/pdf/inspect`, {
         method: 'POST',
         headers: {
           'content-type': req.headers['content-type'] || 'application/pdf',
@@ -184,7 +196,7 @@ app.post('/api/pdf/inspect', express.raw({ type: '*/*', limit: '100mb' }) as any
 app.post('/api/pdf/page-parse', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
   (async () => {
     try {
-      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/pdf/page-parse`, {
+      const fetchRes = await fetchWithTimeout(`${PARSER_SERVICE_URL}/api/pdf/page-parse`, {
         method: 'POST',
         headers: {
           'content-type': req.headers['content-type'] || 'application/pdf',
@@ -206,7 +218,7 @@ app.post('/api/pdf/parse', express.raw({ type: '*/*', limit: '100mb' }) as any, 
   // express.raw consumed the body; re-dispatch using buffered body
   (async () => {
     try {
-      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/pdf/parse`, {
+      const fetchRes = await fetchWithTimeout(`${PARSER_SERVICE_URL}/api/pdf/parse`, {
         method: 'POST',
         headers: {
           'content-type': req.headers['content-type'] || 'application/octet-stream'
@@ -225,7 +237,7 @@ app.post('/api/pdf/parse', express.raw({ type: '*/*', limit: '100mb' }) as any, 
 app.post('/api/docx/parse', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
   (async () => {
     try {
-      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/docx/parse`, {
+      const fetchRes = await fetchWithTimeout(`${PARSER_SERVICE_URL}/api/docx/parse`, {
         method: 'POST',
         headers: {
           'content-type': req.headers['content-type'] || 'application/octet-stream'
@@ -244,7 +256,7 @@ app.post('/api/docx/parse', express.raw({ type: '*/*', limit: '100mb' }) as any,
 app.post('/api/pdf/page-image', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
   (async () => {
     try {
-      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/pdf/page-image`, {
+      const fetchRes = await fetchWithTimeout(`${PARSER_SERVICE_URL}/api/pdf/page-image`, {
         method: 'POST',
         headers: {
           'content-type': req.headers['content-type'] || 'application/pdf',
@@ -260,6 +272,23 @@ app.post('/api/pdf/page-image', express.raw({ type: '*/*', limit: '100mb' }) as 
       res.status(503).json({ error: 'Python parser service unavailable' });
     }
   })();
+});
+
+app.get('/api/pdf/status', async (req, res) => {
+  try {
+    const qs = req.url.split('?')[1] || '';
+    const fetchRes = await fetchWithTimeout(`${PARSER_SERVICE_URL}/api/pdf/status${qs ? '?' + qs : ''}`, {
+      method: 'GET',
+      headers: {
+        'content-type': 'application/json'
+      }
+    });
+    const data = await fetchRes.json();
+    res.status(fetchRes.status).json(data);
+  } catch (err: any) {
+    console.warn('[Parser Proxy] /api/pdf/status failed:', err?.message || err);
+    res.status(503).json({ error: 'Python parser service unavailable' });
+  }
 });
 
 // 0. Page-Level Markdown Parser Endpoint (Structures tables, clauses, and headers)

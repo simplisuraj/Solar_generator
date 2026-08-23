@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { WorkflowSteps } from './components/WorkflowSteps';
 import { Step1Upload } from './components/Step1Upload';
@@ -25,7 +25,9 @@ import {
   ValidationCheckResult,
   ReconciliationItem,
   MailMergePatch,
-  AuditLogEntry
+  AuditLogEntry,
+  PageStatus,
+  PageMetadata
 } from './types';
 
 import { DATA_DICTIONARY, SECTION_ORDER } from './data/dataDictionary';
@@ -70,6 +72,12 @@ export function App() {
   const [files, setFiles] = useState<IngestedFile[]>([]);
   const [documents, setDocuments] = useState<DocumentCaseItem[]>([]);
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
+
+  // Worker ref to prevent duplicate concurrent parsing workers
+  const workerRef = useRef<{ running: boolean; abortController: AbortController | null }>({
+    running: false,
+    abortController: null
+  });
 
   // Appraisal State
   const [classifiedDocs, setClassifiedDocs] = useState<ClassifiedDocument[]>([]);
@@ -128,6 +136,41 @@ export function App() {
     const results = evaluateValidationRules(fields, documents);
     setChecks(results);
   }, [fields, documents]);
+
+  // Detect and recover stale processing pages (> 5 min)
+  const recoverStaleProcessing = useCallback(() => {
+    const now = Date.now();
+    const STALE_MS = 5 * 60 * 1000;
+    setDocuments((prev) => {
+      let changed = false;
+      const next = prev.map((d) => {
+        const newPages = d.pages.map((p) => {
+          if ((p.status === 'PROCESSING') && p.started_at) {
+            const started = new Date(p.started_at).getTime();
+            if (now - started > STALE_MS) {
+              changed = true;
+              return { ...p, status: 'QUEUED' as PageStatus, started_at: null, error: 'Stale processing recovered' };
+            }
+          }
+          return p;
+        });
+        return changed ? { ...d, pages: newPages } : d;
+      });
+      return changed ? next : prev;
+    });
+  }, [setDocuments]);
+
+  // Recover stale processing pages (> 5 min) on mount and tab switch
+  useEffect(() => {
+    recoverStaleProcessing();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        recoverStaleProcessing();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [recoverStaleProcessing]);
 
   // Initialize blank dictionary fields with all required properties
   const initializeBlankWorkspace = () => {
@@ -188,19 +231,62 @@ export function App() {
   };
 
   // Parse a single page with LED tracker
-  const handleParsePage = async (docId: string, pageNum: number) => {
-    const doc = documents.find((d) => d.id === docId);
-    if (!doc) return;
-
-    setActiveProcessingPage({ docId, page: pageNum });
-    logAudit('PAGE_STARTED', `Parsing page ${pageNum} via ${settings.defaultParser}`, docId, doc.filename, pageNum);
-
-    // Call pageParserEngine
-    const parseResult = await parseSinglePage(doc, pageNum, {
-      useOCR: settings.useOCRForScanned
+  const handleParsePage = useCallback(async (docId: string, pageNum: number) => {
+    setDocuments((prev) => {
+      const doc = prev.find((d) => d.id === docId);
+      if (!doc) return prev;
+      const pageIdx = doc.pages.findIndex((p) => p.page === pageNum);
+      if (pageIdx === -1) return prev;
+      const existing = doc.pages[pageIdx];
+      if (existing.status === 'SUCCESS') return prev;
+      const newPages = [...doc.pages];
+      newPages[pageIdx] = {
+        ...existing,
+        status: 'PROCESSING',
+        started_at: new Date().toISOString(),
+        attempts: existing.attempts + 1,
+        error: null
+      };
+      return prev.map((d) => (d.id === docId ? { ...d, pages: newPages } : d));
     });
 
-    // Update document state
+    setActiveProcessingPage({ docId, page: pageNum });
+
+    const docForLog = documents.find((d) => d.id === docId);
+    logAudit('PAGE_STARTED', `Parsing page ${pageNum} via ${settings.defaultParser}`, docId, docForLog?.filename, pageNum);
+
+    let parseResult;
+    try {
+      const doc = documents.find((d) => d.id === docId);
+      if (!doc) {
+        throw new Error(`Document ${docId} not found`);
+      }
+      parseResult = await parseSinglePage(doc, pageNum, {
+        useOCR: settings.useOCRForScanned
+      });
+    } catch (e: any) {
+      setDocuments((prev) => {
+        const doc = prev.find((d) => d.id === docId);
+        if (!doc) return prev;
+        const pageIdx = doc.pages.findIndex((p) => p.page === pageNum);
+        if (pageIdx === -1) return prev;
+        const existing = doc.pages[pageIdx];
+        const newPages = [...doc.pages];
+        newPages[pageIdx] = {
+          ...existing,
+          status: 'FAILED',
+          completed_at: new Date().toISOString(),
+          processing_time_seconds: 0.8,
+          error: e?.message || String(e),
+          char_count: 0
+        };
+        return prev.map((d) => (d.id === docId ? { ...d, pages: newPages } : d));
+      });
+      setActiveProcessingPage(null);
+      logAudit('PAGE_FAILED', e?.message || String(e), docId, docForLog?.filename, pageNum);
+      return;
+    }
+
     setDocuments((prev) =>
       prev.map((d) => (d.id === docId ? parseResult.updatedDoc : d))
     );
@@ -210,55 +296,89 @@ export function App() {
       parseResult.pageMetadata.status === 'SUCCESS' ? 'PAGE_SUCCEEDED' : 'PAGE_FAILED',
       parseResult.pageMetadata.error || `Completed in ${parseResult.pageMetadata.processing_time_seconds}s`,
       docId,
-      doc.filename,
+      docForLog?.filename,
       pageNum
     );
-  };
+  }, [documents, settings.defaultParser, settings.useOCRForScanned, logAudit, setDocuments, setActiveProcessingPage]);
 
-  // Retry only failed pages for a document
-  const handleRetryFailedPages = async (docId: string) => {
-    const doc = documents.find((d) => d.id === docId);
-    if (!doc) return;
-
-    const failedPages = doc.pages.filter((p) => p.status === 'FAILED');
-    setIsProcessing(true);
-    logAudit('PAGE_RETRIED', `Retrying ${failedPages.length} failed pages`, docId, doc.filename);
-
-    for (const p of failedPages) {
-      await handleParsePage(docId, p.page);
+  // Single worker loop that claims QUEUED pages one by one
+  const runWorker = useCallback(async (
+    docIds: string[],
+    pageSelector: (doc: DocumentCaseItem) => PageMetadata[],
+    onComplete?: () => void
+  ) => {
+    if (workerRef.current.running) {
+      console.warn('[Worker] Another worker is already running');
+      return;
     }
-    setIsProcessing(false);
-  };
 
-  // Reprocess all pages for a document
-  const handleReprocessAllPages = async (docId: string) => {
-    const doc = documents.find((d) => d.id === docId);
-    if (!doc) return;
-
+    const controller = new AbortController();
+    workerRef.current = { running: true, abortController: controller };
     setIsProcessing(true);
-    logAudit('PAGE_STARTED', `Reprocessing all ${doc.total_pages} pages`, docId, doc.filename);
 
-    for (let p = 1; p <= doc.total_pages; p++) {
-      await handleParsePage(docId, p);
-    }
-    setIsProcessing(false);
-  };
+    try {
+      for (const docId of docIds) {
+        if (controller.signal.aborted) break;
+        let docPages: PageMetadata[] = [];
+        let docName = '';
+        let totalPages = 0;
 
-  // Parse all ingested documents across entire dossier
-  const handleParseAllDocuments = async () => {
-    setIsProcessing(true);
-    logAudit('PAGE_STARTED', `Batch parsing all ${documents.length} ingested documents`);
+        setDocuments((prev) => {
+          const doc = prev.find((d) => d.id === docId);
+          if (!doc) return prev;
+          docPages = pageSelector(doc);
+          docName = doc.filename;
+          totalPages = doc.total_pages;
+          return prev;
+        });
 
-    for (const doc of documents) {
-      for (let p = 1; p <= doc.total_pages; p++) {
-        const existingPage = doc.pages.find((page) => page.page === p);
-        if (!existingPage || existingPage.status !== 'SUCCESS') {
-          await handleParsePage(doc.id, p);
+        for (const page of docPages) {
+          if (controller.signal.aborted) break;
+          if (page.status === 'SUCCESS') continue;
+          await handleParsePage(docId, page.page);
         }
       }
+    } finally {
+      workerRef.current = { running: false, abortController: null };
+      setIsProcessing(false);
+      if (onComplete) onComplete();
     }
-    setIsProcessing(false);
-  };
+  }, [handleParsePage, setIsProcessing]);
+
+  // Retry only failed pages for a document
+  const handleRetryFailedPages = useCallback(async (docId: string) => {
+    const doc = documents.find((d) => d.id === docId);
+    if (!doc) return;
+    const failedPages = doc.pages.filter((p) => p.status === 'FAILED');
+    logAudit('PAGE_RETRIED', `Retrying ${failedPages.length} failed pages`, docId, doc.filename);
+    await runWorker(
+      [docId],
+      (doc) => doc.pages.filter((p) => p.status === 'FAILED'),
+      () => {}
+    );
+  }, [documents, logAudit, runWorker]);
+
+  // Reprocess all pages for a document
+  const handleReprocessAllPages = useCallback(async (docId: string) => {
+    const doc = documents.find((d) => d.id === docId);
+    if (!doc) return;
+    logAudit('PAGE_STARTED', `Reprocessing all ${doc.total_pages} pages`, docId, doc.filename);
+    await runWorker(
+      [docId],
+      (doc) => doc.pages,
+      () => {}
+    );
+  }, [documents, logAudit, runWorker]);
+
+  // Parse all ingested documents across entire dossier
+  const handleParseAllDocuments = useCallback(async () => {
+    logAudit('PAGE_STARTED', `Batch parsing all ${documents.length} ingested documents`);
+    await runWorker(
+      documents.map((d) => d.id),
+      (doc) => doc.pages,
+      () => {}
+    );
+  }, [documents, logAudit, runWorker]);
 
   // Execute Step 2: Document Intelligence
   const handleRunClassification = async () => {

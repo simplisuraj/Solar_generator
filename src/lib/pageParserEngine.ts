@@ -1,5 +1,18 @@
 import { DocumentCaseItem, PageMetadata, PageStatus, IngestedFile } from '../types';
 
+const PAGE_PARSE_TIMEOUT_MS = 120_000;
+const PAGE_PARSE_RETRIES = 2;
+
+async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = PAGE_PARSE_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 export interface DocumentParser {
   name: string;
   parsePage(params: {
@@ -134,61 +147,75 @@ export class LlamaIndexDocumentParser implements DocumentParser {
     // from the Stage 2 LED monitor so the user sees live progress. Cached
     // pages return instantly with zero credit usage.
     if (params.rawSourceFile instanceof Blob) {
-      try {
-        const buf = await params.rawSourceFile.arrayBuffer();
-        const resp = await fetch('/api/pdf/page-parse', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/pdf',
-            'x-page-number': String(params.pageNumber),
-            'x-file-name': encodeURIComponent(params.filename)
-          },
-          body: buf
-        });
+      let lastErr: any = null;
+      for (let attempt = 0; attempt <= PAGE_PARSE_RETRIES; attempt++) {
+        try {
+          const buf = await params.rawSourceFile.arrayBuffer();
+          const resp = await fetchWithTimeout('/api/pdf/page-parse', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/pdf',
+              'x-page-number': String(params.pageNumber),
+              'x-file-name': encodeURIComponent(params.filename)
+            },
+            body: buf
+          });
 
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data && typeof data.markdown === 'string') {
-            const elapsed = parseFloat(((performance.now() - startTime) / 1000).toFixed(2));
-            const mdBody = data.markdown.trim()
-              || `[No content extracted for page ${params.pageNumber} — likely a blank or image-only scan]`;
-            const finalMarkdown = formatPageMarkdown(
-              params.documentId,
-              params.filename,
-              params.pageNumber,
-              data.pageCount || params.totalPages,
-              mdBody,
-              data.cached ? 'llamaparse_cached' : 'llamaparse_agentic'
-            );
-            return {
-              markdown: finalMarkdown,
-              pageNumber: params.pageNumber,
-              metadata: {
-                charCount: finalMarkdown.length,
-                hasSearchableText: mdBody.length > 15,
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data && typeof data.markdown === 'string') {
+              const elapsed = parseFloat(((performance.now() - startTime) / 1000).toFixed(2));
+              const mdBody = data.markdown.trim()
+                || `[No content extracted for page ${params.pageNumber} — likely a blank or image-only scan]`;
+              const finalMarkdown = formatPageMarkdown(
+                params.documentId,
+                params.filename,
+                params.pageNumber,
+                data.pageCount || params.totalPages,
+                mdBody,
+                data.cached ? 'llamaparse_cached' : 'llamaparse_agentic'
+              );
+              return {
+                markdown: finalMarkdown,
+                pageNumber: params.pageNumber,
+                metadata: {
+                  charCount: finalMarkdown.length,
+                  hasSearchableText: mdBody.length > 15,
+                  parser: data.cached ? 'llamaparse_cached' : 'llamaparse_agentic',
+                  cached: Boolean(data.cached),
+                  cachedPages: data.cachedPages,
+                  allPagesDone: Boolean(data.allPagesDone),
+                  stitched: Boolean(data.stitched)
+                },
                 parser: data.cached ? 'llamaparse_cached' : 'llamaparse_agentic',
-                cached: Boolean(data.cached),
-                cachedPages: data.cachedPages,
-                allPagesDone: Boolean(data.allPagesDone),
-                stitched: Boolean(data.stitched)
-              },
-              parser: data.cached ? 'llamaparse_cached' : 'llamaparse_agentic',
-              processingTimeSeconds: Math.max(0.2, elapsed)
-            };
+                processingTimeSeconds: Math.max(0.2, elapsed)
+              };
+            }
+          } else {
+            const errData = await resp.json().catch(() => null);
+            lastErr = new Error(errData?.error || `page-parse HTTP ${resp.status}`);
+            if (resp.status === 409) {
+              throw lastErr;
+            }
           }
-        } else {
-          const errData = await resp.json().catch(() => null);
-          throw new Error(errData?.error || `page-parse HTTP ${resp.status}`);
+        } catch (e: any) {
+          lastErr = e;
+          if (attempt < PAGE_PARSE_RETRIES) {
+            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+            continue;
+          }
+          console.warn(`[PageParser] LlamaParse per-page parse failed after ${PAGE_PARSE_RETRIES + 1} attempts:`, e?.message || e);
+          break;
         }
-      } catch (e: any) {
-        console.warn('[PageParser] LlamaParse per-page parse failed:', e?.message || e);
-        // fall through to text-based flow below
+      }
+      if (lastErr) {
+        console.warn('[PageParser] LlamaParse per-page parse failed:', lastErr?.message || lastErr);
       }
     }
 
     // First attempt real server-side API call to structure page markdown
     try {
-      const resp = await fetch('/api/gemini/parse-page', {
+      const resp = await fetchWithTimeout('/api/gemini/parse-page', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -440,11 +467,13 @@ export async function parseSinglePage(
   // Create active processing metadata
   const processingMeta: PageMetadata = {
     ...existingMeta,
-    status: existingMeta.attempts > 0 ? 'RETRYING' : 'PROCESSING',
+    status: 'PROCESSING',
     started_at: startTimeIso,
     attempts: existingMeta.attempts + 1,
     error: null
   };
+
+  console.log(`[PageParserEngine] QUEUED -> ${processingMeta.status} doc=${doc.id} page=${pageNumber} attempt=${processingMeta.attempts}`);
 
   // Get raw chunk
   const chunks = splitTextIntoPageChunks(doc.raw_source_text || '', doc.total_pages);
@@ -455,6 +484,7 @@ export async function parseSinglePage(
       throw new Error(`Synthetic upstream timeout during LlamaIndex OCR extraction for page ${pageNumber}`);
     }
 
+    console.log(`[PageParserEngine] Stage start doc=${doc.id} page=${pageNumber} parser=${parser.name}`);
     const parseResult = await parser.parsePage({
       documentId: doc.id,
       filename: doc.filename,
@@ -464,6 +494,7 @@ export async function parseSinglePage(
       rawSourceFile: doc.raw_source_file,
       useOCR: options.useOCR ?? true
     });
+    console.log(`[PageParserEngine] Stage complete doc=${doc.id} page=${pageNumber} parser=${parseResult.parser} time=${parseResult.processingTimeSeconds}s`);
 
     const completedTimeIso = new Date().toISOString();
     const successMeta: PageMetadata = {

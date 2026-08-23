@@ -72,7 +72,7 @@ export const ParsingMonitor: React.FC<ParsingMonitorProps> = ({
     0
   );
   const processingPagesAll = documents.reduce(
-    (sum, d) => sum + d.pages.filter((p) => p.status === 'PROCESSING' || p.status === 'RETRYING').length,
+    (sum, d) => sum + d.pages.filter((p) => p.status === 'PROCESSING').length,
     0
   );
   const queuedPagesAll = totalPagesAll - (successPagesAll + failedPagesAll + processingPagesAll);
@@ -83,7 +83,7 @@ export const ParsingMonitor: React.FC<ParsingMonitorProps> = ({
   const activeSuccess = activeDoc ? activeDoc.pages.filter((p) => p.status === 'SUCCESS').length : 0;
   const activeFailed = activeDoc ? activeDoc.pages.filter((p) => p.status === 'FAILED').length : 0;
   const activeProcessing = activeDoc
-    ? activeDoc.pages.filter((p) => p.status === 'PROCESSING' || p.status === 'RETRYING').length
+    ? activeDoc.pages.filter((p) => p.status === 'PROCESSING').length
     : 0;
   const activeQueued = activeTotal - (activeSuccess + activeFailed + activeProcessing);
   const activePct = activeTotal > 0 ? Math.round((activeSuccess / activeTotal) * 100) : 0;
@@ -100,12 +100,9 @@ export const ParsingMonitor: React.FC<ParsingMonitorProps> = ({
       case 'SUCCESS':
         return 'bg-emerald-500 text-white shadow-xs shadow-emerald-500/50 border-emerald-400';
       case 'PROCESSING':
-      case 'RETRYING':
         return 'bg-amber-500 text-white animate-pulse shadow-xs shadow-amber-500/50 border-amber-300 ring-2 ring-amber-400/40';
       case 'FAILED':
         return 'bg-rose-600 text-white shadow-xs shadow-rose-600/50 border-rose-400';
-      case 'SKIPPED':
-        return 'bg-slate-400 text-slate-900 border-slate-300';
       case 'QUEUED':
       default:
         return 'bg-slate-200 text-slate-600 hover:bg-slate-300 border-slate-300';
@@ -118,8 +115,6 @@ export const ParsingMonitor: React.FC<ParsingMonitorProps> = ({
         return <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded text-xs font-semibold border border-emerald-200">🟢 SUCCESS</span>;
       case 'PROCESSING':
         return <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded text-xs font-semibold border border-amber-200 animate-pulse">🟠 PROCESSING</span>;
-      case 'RETRYING':
-        return <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded text-xs font-semibold border border-amber-200 animate-pulse">🟠 RETRYING</span>;
       case 'FAILED':
         return <span className="inline-flex items-center gap-1 text-rose-700 bg-rose-50 px-2 py-0.5 rounded text-xs font-semibold border border-rose-200">🔴 FAILED</span>;
       case 'QUEUED':
