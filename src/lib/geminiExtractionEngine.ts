@@ -1,4 +1,4 @@
-import { DataDictionaryField, ExtractedField, DocumentCaseItem, OperatingMode } from '../types';
+import { DataDictionaryField, ExtractedField, DocumentCaseItem } from '../types';
 
 /**
  * Clean regex-based evidence scanner that finds exact page numbers and quotes from Markdown
@@ -259,7 +259,6 @@ export function extractEvidenceFromPageMarkdowns(
 export async function runStructuredExtraction(
   fieldsToExtract: DataDictionaryField[],
   documents: DocumentCaseItem[],
-  operatingMode: OperatingMode = 'production',
   onProgress?: (field: ExtractedField, index: number, total: number) => void
 ): Promise<ExtractedField[]> {
   const extractedList: ExtractedField[] = [];

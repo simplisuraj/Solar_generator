@@ -16,7 +16,6 @@ import { FieldDetailModal } from './components/FieldDetailModal';
 import {
   ActiveViewTab,
   AppSettings,
-  OperatingMode,
   IngestedFile,
   DocumentCaseItem,
   ClassifiedDocument,
@@ -59,7 +58,6 @@ export function App() {
 
   // App Settings
   const [settings, setSettings] = useState<AppSettings>({
-    operatingMode: 'demo',
     concurrency: 4,
     defaultParser: 'llamaindex',
     useOCRForScanned: true,
@@ -369,8 +367,7 @@ export function App() {
     try {
       const extractedResults = await runStructuredExtraction(
         DATA_DICTIONARY,
-        documents,
-        settings.operatingMode
+        documents
       );
 
       setFields(extractedResults);
@@ -507,8 +504,6 @@ export function App() {
         isProcessing={isProcessing}
         activeTab={activeTab}
         onSelectTab={setActiveTab}
-        operatingMode={settings.operatingMode}
-        onToggleMode={(mode) => setSettings((prev) => ({ ...prev, operatingMode: mode }))}
         totalParsedPct={totalParsedPct}
       />
 
@@ -547,7 +542,6 @@ export function App() {
             onParseAllDocuments={handleParseAllDocuments}
             isProcessing={isProcessing}
             activeProcessingPage={activeProcessingPage}
-            operatingMode={settings.operatingMode}
             onProceedToExtraction={() => {
               if (classifiedDocs.length === 0) {
                 handleRunClassification();

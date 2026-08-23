@@ -253,13 +253,10 @@ export type ActiveViewTab =
   | 'audit_log'
   | 'settings';
 
-export type OperatingMode = 'production' | 'demo';
-
 export interface AppSettings {
   concurrency: number;
   defaultParser: 'llamaindex' | 'pdf_native' | 'ocr_enhanced';
   useOCRForScanned: boolean;
-  operatingMode: OperatingMode;
   autoStitchOnComplete: boolean;
   strictValidationGate: boolean;
 }

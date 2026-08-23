@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import {
   DocumentCaseItem,
   PageMetadata,
-  PageStatus,
-  OperatingMode
+  PageStatus
 } from '../types';
 import {
   RefreshCw,
@@ -37,7 +36,6 @@ interface ParsingMonitorProps {
   onParseAllDocuments: () => Promise<void>;
   isProcessing: boolean;
   activeProcessingPage?: { docId: string; page: number } | null;
-  operatingMode: OperatingMode;
   onProceedToExtraction: () => void;
 }
 
@@ -51,7 +49,6 @@ export const ParsingMonitor: React.FC<ParsingMonitorProps> = ({
   onParseAllDocuments,
   isProcessing,
   activeProcessingPage,
-  operatingMode,
   onProceedToExtraction
 }) => {
   const [selectedPageDetail, setSelectedPageDetail] = useState<{

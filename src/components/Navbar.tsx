@@ -1,16 +1,12 @@
 import React from 'react';
 import {
-  ShieldCheck,
-  Cpu,
   Sparkles,
   RefreshCw,
   Sliders,
   History,
-  Archive,
-  Layers,
-  Activity
+  Archive
 } from 'lucide-react';
-import { ActiveViewTab, OperatingMode } from '../types';
+import { ActiveViewTab } from '../types';
 
 interface NavbarProps {
   hasGeminiKey: boolean;
@@ -18,8 +14,6 @@ interface NavbarProps {
   isProcessing: boolean;
   activeTab: ActiveViewTab;
   onSelectTab: (tab: ActiveViewTab) => void;
-  operatingMode: OperatingMode;
-  onToggleMode: (mode: OperatingMode) => void;
   totalParsedPct: number;
 }
 
@@ -29,8 +23,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   isProcessing,
   activeTab,
   onSelectTab,
-  operatingMode,
-  onToggleMode,
   totalParsedPct
 }) => {
   return (
@@ -56,36 +48,8 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Center/Right: Mode Toggle & Navigation Shortcuts */}
+        {/* Center/Right: Navigation Shortcuts */}
         <div className="flex items-center space-x-2.5">
-          {/* Operating Mode Selector */}
-          <div className="flex items-center bg-slate-800 p-0.5 rounded-lg border border-slate-700 text-xs">
-            <button
-              onClick={() => onToggleMode('production')}
-              className={`px-2.5 py-1 rounded-md font-semibold transition cursor-pointer flex items-center gap-1 ${
-                operatingMode === 'production'
-                  ? 'bg-emerald-600 text-white shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-              title="Strict zero-mock production mode"
-            >
-              <ShieldCheck className="w-3.5 h-3.5" />
-              Production
-            </button>
-            <button
-              onClick={() => onToggleMode('demo')}
-              className={`px-2.5 py-1 rounded-md font-semibold transition cursor-pointer flex items-center gap-1 ${
-                operatingMode === 'demo'
-                  ? 'bg-amber-600 text-white shadow-xs'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-              title="Interactive sample dossiers with pre-loaded cases"
-            >
-              <span>🧪</span>
-              Demo Mode
-            </button>
-          </div>
-
           {/* Quick Access to Export Centre & Audit Log */}
           <button
             onClick={() => onSelectTab('export_centre')}
