@@ -27,7 +27,7 @@ SCANNED_CHARS_PER_KB = 20
 MIN_TEXT_CHARS = 20
 
 LLAMA_CLOUD_BASE = os.environ.get("LLAMA_CLOUD_BASE_URL", "https://api.cloud.llamaindex.ai")
-LLAMA_PARSE_MODE = os.environ.get("LLAMA_PARSE_MODE", "parse_page")  # page-aligned markdown
+LLAMA_PARSE_TIER = os.environ.get("LLAMA_PARSE_TIER", "agentic")
 
 
 def _llama_api_key() -> str:
@@ -39,63 +39,43 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def llama_parse_pdf(data: bytes, filename: str, timeout_seconds: int = 150):
-    """Run LlamaParse and return a list of per-page markdown strings.
+def llama_parse_pdf(data: bytes, filename: str, timeout_seconds: int = 240):
+    """Run LlamaParse via the official llama-cloud SDK.
 
-    Raises on any failure so callers can fall back to local parsing.
+    Returns a list of per-page markdown strings. Raises on any failure so
+    callers can fall back to local parsing.
     """
     api_key = _llama_api_key()
     if not api_key:
         raise RuntimeError("LLAMA_CLOUD_API_KEY not configured")
 
-    headers = {"Authorization": f"Bearer {api_key}"}
+    from llama_cloud import LlamaCloud
 
-    with httpx.Client(timeout=60.0) as client:
-        upload = client.post(
-            f"{LLAMA_CLOUD_BASE}/api/parsing/upload",
-            headers=headers,
-            files={"file": (filename or "document.pdf", data, "application/pdf")},
-            data={"parse_mode": LLAMA_PARSE_MODE},
-        )
-        upload.raise_for_status()
-        job_id = upload.json().get("id")
-        if not job_id:
-            raise RuntimeError(f"LlamaParse upload returned no job id: {upload.text[:200]}")
+    client = LlamaCloud(api_key=api_key, base_url=LLAMA_CLOUD_BASE, timeout=timeout_seconds)
+    result = client.parsing.parse(
+        upload_file=(filename or "document.pdf", data, "application/pdf"),
+        tier=LLAMA_PARSE_TIER,          # 'agentic' handles scans, tables, stamps
+        version="latest",
+        expand=["markdown"],
+    )
 
-        deadline = time.time() + timeout_seconds
-        status = None
-        while time.time() < deadline:
-            poll = client.get(f"{LLAMA_CLOUD_BASE}/api/parsing/job/{job_id}", headers=headers)
-            poll.raise_for_status()
-            status = poll.json().get("status")
-            if status in ("SUCCESS", "ERROR", "PARTIAL_SUCCESS"):
-                break
-            time.sleep(2)
+    md_obj = getattr(result, "markdown", None)
+    pages = getattr(md_obj, "pages", None) if md_obj is not None else None
 
-        if status not in ("SUCCESS", "PARTIAL_SUCCESS"):
-            raise RuntimeError(f"LlamaParse job {job_id} ended with status={status}")
+    out = []
+    if pages:
+        for p in pages:
+            md = (getattr(p, "markdown", None) or getattr(p, "md", "") or "").strip()
+            out.append(md)
+    else:
+        full = (getattr(md_obj, "markdown", None) or "") if md_obj is not None else ""
+        if isinstance(full, str) and full.strip():
+            return [full.strip()]
+        raise RuntimeError("LlamaParse returned no markdown content")
 
-        # Prefer structured per-page result so markdown stays page-aligned
-        try:
-            detail = client.get(
-                f"{LLAMA_CLOUD_BASE}/api/parsing/job/{job_id}/result/json", headers=headers
-            )
-            if detail.status_code == 200:
-                payload = detail.json()
-                pages_md = [
-                    (p.get("md") or p.get("markdown") or "").strip()
-                    for p in payload.get("pages", [])
-                ]
-                if any(pages_md):
-                    return pages_md
-        except Exception:
-            pass
-
-        md = client.get(
-            f"{LLAMA_CLOUD_BASE}/api/parsing/job/{job_id}/result/markdown", headers=headers
-        )
-        md.raise_for_status()
-        return [md.text]
+    if not any(out):
+        raise RuntimeError("LlamaParse returned only empty page markdown")
+    return out
 
 
 def _local_pdf_pages(pdf) -> list:
