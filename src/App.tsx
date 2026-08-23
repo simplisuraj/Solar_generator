@@ -707,11 +707,7 @@ export function App() {
             isProcessing={isProcessing}
             activeProcessingPages={activeProcessingPages}
             onProceedToExtraction={() => {
-              if (classifiedDocs.length === 0) {
-                handleRunClassification();
-              } else {
-                setActiveTab('dashboard');
-              }
+              handleRunExtraction().catch((e) => console.warn('Extraction error:', e));
             }}
           />
         )}

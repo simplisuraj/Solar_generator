@@ -35,6 +35,7 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
 // Ox Alpha AI engine (OpenAI-compatible via OpenRouter)
 const OXALPHA_API_URL = process.env.OXALPHA_API_URL || 'https://openrouter.ai/api/v1/chat/completions';
 const OXALPHA_MODEL = process.env.OXALPHA_MODEL || 'stealth/ox-alpha';
+const EXTRACTION_MODEL = process.env.EXTRACTION_MODEL || OXALPHA_MODEL;
 
 function getOxAlphaKey(): string {
   return process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || '';
@@ -114,11 +115,12 @@ function safeJsonParse<T>(text: string | undefined | null, fallback: T): T {
   }
 }
 
-// Structured (JSON) generation via Ox Alpha
+// Structured (JSON) generation via OpenRouter
 async function generateStructuredContent<T>(
   prompt: string,
   schema: any,
-  fallbackValue: T
+  fallbackValue: T,
+  modelOverride?: string
 ): Promise<T> {
   if (!hasOxAlphaKey()) {
     console.warn('[Ox Alpha] OPENROUTER_API_KEY not configured on server. Returning fallback.');
@@ -135,10 +137,10 @@ async function generateStructuredContent<T>(
     { role: 'user', content: prompt }
   ];
 
-  let text = await oxAlphaChat(messages, { jsonMode: true });
+  const model = modelOverride || OXALPHA_MODEL;
+  let text = await oxAlphaChat(messages, { jsonMode: true, model });
   if (!text) {
-    // Retry without response_format in case the model rejects json mode
-    text = await oxAlphaChat(messages, { maxTokens: 8192 });
+    text = await oxAlphaChat(messages, { maxTokens: 8192, model });
   }
   if (text) {
     const parsed = safeJsonParse<T | null>(text, null);
@@ -500,7 +502,7 @@ ${(page_markdowns || '').slice(0, 45000)}`;
     required: ['fields']
   };
 
-  const result = await generateStructuredContent(prompt, schema, fallback);
+  const result = await generateStructuredContent(prompt, schema, fallback, EXTRACTION_MODEL);
   return res.json(result && result.fields && result.fields.length > 0 ? result : fallback);
 });
 
