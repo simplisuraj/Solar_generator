@@ -51,63 +51,6 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def llama_parse_pdf(data: bytes, filename: str, timeout_seconds: int = 240):
-    """Run LlamaParse via the official llama-cloud SDK.
-
-    Returns a list of per-page markdown strings. Raises on any failure so
-    callers can fall back to local parsing.
-    """
-    api_key = _llama_api_key()
-    if not api_key:
-        raise RuntimeError("LLAMA_CLOUD_API_KEY not configured")
-
-    from llama_cloud import LlamaCloud
-
-    client = LlamaCloud(api_key=api_key, base_url=LLAMA_CLOUD_BASE, timeout=timeout_seconds)
-    result = client.parsing.parse(
-        upload_file=(filename or "document.pdf", data, "application/pdf"),
-        tier=LLAMA_PARSE_TIER,          # 'agentic' handles scans, tables, stamps
-        version="latest",
-        expand=["markdown"],
-    )
-
-    md_obj = getattr(result, "markdown", None)
-    pages = getattr(md_obj, "pages", None) if md_obj is not None else None
-
-    out = []
-    if pages:
-        for p in pages:
-            md = (getattr(p, "markdown", None) or getattr(p, "md", "") or "").strip()
-            out.append(md)
-    else:
-        full = (getattr(md_obj, "markdown", None) or "") if md_obj is not None else ""
-        if isinstance(full, str) and full.strip():
-            return [full.strip()]
-        raise RuntimeError("LlamaParse returned no markdown content")
-
-    # Blank/scanned pages legitimately produce empty markdown; the app flags
-    # those as scanned and routes them through AI OCR. Only fail if the
-    # result structure itself is unusable.
-    return out
-
-
-def split_pdf_single_pages(data: bytes) -> list:
-    """Split a PDF into single-page PDF bytes, preserving page order."""
-    src = pdfium.PdfDocument(io.BytesIO(data))
-    try:
-        single_page_pdfs = []
-        for i in range(len(src)):
-            dst = pdfium.PdfDocument.new()
-            dst.import_pages(src, pages=[i])
-            buf = io.BytesIO()
-            dst.save(buf)
-            dst.close()
-            single_page_pdfs.append(buf.getvalue())
-        return single_page_pdfs
-    finally:
-        src.close()
-
-
 LLAMA_CONCURRENCY = int(os.environ.get("LLAMA_CONCURRENCY", "5"))
 
 
@@ -135,67 +78,127 @@ def _llama_parse_one(client, page_bytes: bytes, filename: str, retries: int = 2)
     raise RuntimeError(f"LlamaParse page parse failed after {retries + 1} attempts: {last_err}")
 
 
-def llama_parse_pdf_per_page(
-    data: bytes, filename: str, page_count: int, timeout_seconds: int = 240
-):
-    """Parse a PDF page-by-page: one LlamaParse API call per single-page PDF.
+@app.get("/api/pdf/health")
+def health():
+    return {"ok": True, "service": "python-parser", "engine": "pypdfium2"}
 
-    Runs LLAMA_CONCURRENCY (default 5) calls in parallel and returns the
-    markdown strings in original page order.
+
+# ---------------------------------------------------------------------------
+# Page-level Markdown cache: one .md file per page in a per-document folder.
+# Retrying a document skips every cached page to save LlamaParse credits;
+# once all pages are cached they are stitched into a single final .md file.
+# ---------------------------------------------------------------------------
+CACHE_ROOT = os.environ.get(
+    "PAGE_CACHE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".page_cache"),
+)
+
+
+def _file_hash(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _cache_dir(file_hash: str) -> str:
+    path = os.path.join(CACHE_ROOT, file_hash)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _page_cache_path(cache: str, page: int) -> str:
+    return os.path.join(cache, f"page-{page}.md")
+
+
+def _read_cached_pages(cache: str, page_count: int) -> list:
+    """Return markdown per page (empty string if not cached)."""
+    pages = []
+    for i in range(1, page_count + 1):
+        md = ""
+        try:
+            with open(_page_cache_path(cache, i), encoding="utf-8") as f:
+                md = f.read().strip()
+        except FileNotFoundError:
+            pass
+        pages.append(md)
+    return pages
+
+
+def _stitch_final_md(cache: str, filename: str, page_markdowns: list) -> str:
+    """Stitch all per-page .md files into final.md and return it."""
+    parts = [
+        "---",
+        f'source_file: "{filename}"',
+        f"total_pages: {len(page_markdowns)}",
+        f'stitched_at: "{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}"',
+        "---",
+        "",
+    ]
+    for i, md in enumerate(page_markdowns, start=1):
+        parts.append(f"# Page {i}")
+        parts.append("")
+        parts.append(md if md else "[No content extracted for this page]")
+        parts.append("")
+    stitched = "\n".join(parts).strip() + "\n"
+    with open(os.path.join(cache, "final.md"), "w", encoding="utf-8") as f:
+        f.write(stitched)
+    return stitched
+
+
+def parse_pdf_with_page_cache(data: bytes, filename: str, page_count: int):
+    """Parse using the per-page cache. Returns (pages, cached_count, parsed_count).
+
+    - Skips any page already present in the cache (credit saving on retries)
+    - Parses only missing pages via LlamaParse (5 concurrent calls)
+    - Writes each result as page-N.md
+    - When every page is cached, stitches them into final.md
     """
+    cache = _cache_dir(_file_hash(data))
+    cached = _read_cached_pages(cache, page_count)
+    cached_count = sum(1 for md in cached if md)
+    already_complete = all(md is not None and os.path.exists(_page_cache_path(cache, i + 1)) for i, md in enumerate(cached))
+
+    # Fast path: fully cached document — zero API calls
+    if all(os.path.exists(_page_cache_path(cache, i + 1)) for i in range(page_count)):
+        return cached, cached_count, 0
+
+    # Parse only the missing pages, 5 concurrent LlamaParse calls
+    missing = [i for i in range(page_count) if not os.path.exists(_page_cache_path(cache, i + 1))]
     api_key = _llama_api_key()
     if not api_key:
         raise RuntimeError("LLAMA_CLOUD_API_KEY not configured")
 
     from llama_cloud import LlamaCloud
 
-    client = LlamaCloud(api_key=api_key, base_url=LLAMA_CLOUD_BASE, timeout=timeout_seconds)
+    client = LlamaCloud(api_key=api_key, base_url=LLAMA_CLOUD_BASE, timeout=240)
     page_pdfs = split_pdf_single_pages(data)
 
-    results = [""] * len(page_pdfs)
+    results = {}
     errors = {}
 
     def work(idx: int):
         try:
-            results[idx] = _llama_parse_one(
-                client, page_pdfs[idx], f"page-{idx + 1}.pdf"
-            )
+            results[idx] = _llama_parse_one(client, page_pdfs[idx], f"page-{idx + 1}.pdf")
         except Exception as e:
             errors[idx] = e
 
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=max(1, LLAMA_CONCURRENCY)) as pool:
-        list(pool.map(work, range(len(page_pdfs))))
+        list(pool.map(work, missing))
 
-    if len(errors) == len(page_pdfs):
-        raise RuntimeError(f"All {len(errors)} LlamaParse page calls failed; first error: {list(errors.values())[0]}")
+    # Persist successful pages; failed pages stay uncached so a retry re-parses only those
+    for idx, md in results.items():
+        with open(_page_cache_path(cache, idx + 1), "w", encoding="utf-8") as f:
+            f.write(md)
 
-    # Pad any missing/failed pages so ordering stays intact; the app flags
-    # empty pages as scanned and routes them through AI OCR.
-    return results
+    if len(errors) == len(missing):
+        raise RuntimeError(
+            f"All {len(errors)} LlamaParse page calls failed; first error: {list(errors.values())[0]}"
+        )
 
-
-def _local_pdf_pages(pdf) -> list:
-    """Local pypdfium2 extraction; returns list of (text, scanned_flag)."""
-    out = []
-    for i in range(len(pdf)):
-        page = pdf[i]
-        text = ""
-        try:
-            text_page = page.get_textpage()
-            text = _clean_text(text_page.get_text_bounded()) or ""
-            text_page.close()
-        except Exception:
-            text = ""
-        out.append((text, len(text) < MIN_TEXT_CHARS))
-        page.close()
-    return out
-
-
-@app.get("/api/pdf/health")
-def health():
-    return {"ok": True, "service": "python-parser", "engine": "pypdfium2"}
+    pages = _read_cached_pages(cache, page_count)
+    newly_parsed = sum(1 for idx in results if results[idx])
+    return pages, cached_count, newly_parsed
 
 
 @app.post("/api/pdf/parse")
@@ -217,25 +220,40 @@ async def parse_pdf(request: Request):
         scanned_count = 0
 
         # Primary: LlamaParse (LlamaIndex cloud), one API call per page with
-        # LLAMA_CONCURRENCY parallel calls — handles scans, tables, layouts
+        # LLAMA_CONCURRENCY parallel calls — handles scans, tables, layouts.
+        # Pages are cached individually; retries skip cached pages.
         llama_pages = None
         parser_used = "pypdfium2"
+        meta_extra = {}
         if _llama_api_key():
             try:
-                llama_pages = await _run_llama(
-                    llama_parse_pdf_per_page, data, filename, page_count
+                llama_pages, cached_count, parsed_count = await _run_llama(
+                    parse_pdf_with_page_cache, data, filename, page_count
                 )
                 parser_used = "llamaparse"
+                meta_extra = {
+                    "cachedPages": cached_count,
+                    "parsedPages": parsed_count,
+                }
             except Exception as e:
                 print(f"[LlamaParse] failed, falling back to pypdfium2: {e}")
 
-        if llama_pages:
+        if llama_pages is not None:
             pages = []
             for i in range(page_count):
                 md = llama_pages[i] if i < len(llama_pages) else ""
                 pages.append(f"[PDF page {i + 1}]\n{md}" if md else f"[PDF page {i + 1}]")
                 if len(md) < MIN_TEXT_CHARS:
                     scanned_count += 1
+
+            # Stitch final.md when every page has been successfully responded
+            file_hash = _file_hash(data)
+            cache = _cache_dir(file_hash)
+            all_present = all(os.path.exists(_page_cache_path(cache, i + 1)) for i in range(page_count))
+            stitched_path = os.path.join(cache, "final.md")
+            if all_present and not os.path.exists(stitched_path):
+                await _run_llama(_stitch_final_md, cache, filename, llama_pages)
+            meta_extra["stitched"] = os.path.exists(stitched_path)
         else:
             local = _local_pdf_pages(pdf)
             pages = []
@@ -253,6 +271,7 @@ async def parse_pdf(request: Request):
             "scannedPages": scanned_count,
             "isMostlyScanned": page_count > 0 and scanned_count > page_count / 2,
             "parser": parser_used,
+            **meta_extra,
         }
     finally:
         pdf.close()
