@@ -91,6 +91,91 @@ def llama_parse_pdf(data: bytes, filename: str, timeout_seconds: int = 240):
     return out
 
 
+def split_pdf_single_pages(data: bytes) -> list:
+    """Split a PDF into single-page PDF bytes, preserving page order."""
+    src = pdfium.PdfDocument(io.BytesIO(data))
+    try:
+        single_page_pdfs = []
+        for i in range(len(src)):
+            dst = pdfium.PdfDocument.new()
+            dst.import_pages(src, pages=[i])
+            buf = io.BytesIO()
+            dst.save(buf)
+            dst.close()
+            single_page_pdfs.append(buf.getvalue())
+        return single_page_pdfs
+    finally:
+        src.close()
+
+
+LLAMA_CONCURRENCY = int(os.environ.get("LLAMA_CONCURRENCY", "5"))
+
+
+def _llama_parse_one(client, page_bytes: bytes, filename: str, retries: int = 2) -> str:
+    """Parse one single-page PDF via LlamaParse with retry on failure."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            result = client.parsing.parse(
+                upload_file=(filename, page_bytes, "application/pdf"),
+                tier=LLAMA_PARSE_TIER,
+                version="latest",
+                expand=["markdown"],
+            )
+            md_obj = getattr(result, "markdown", None)
+            pages = getattr(md_obj, "pages", None) if md_obj is not None else None
+            if pages:
+                md = (getattr(pages[0], "markdown", None) or getattr(pages[0], "md", "") or "")
+                return md.strip()
+            full = (getattr(md_obj, "markdown", None) or "") if md_obj is not None else ""
+            return (full or "").strip()
+        except Exception as e:  # transient API failures — retry then give up
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"LlamaParse page parse failed after {retries + 1} attempts: {last_err}")
+
+
+def llama_parse_pdf_per_page(
+    data: bytes, filename: str, page_count: int, timeout_seconds: int = 240
+):
+    """Parse a PDF page-by-page: one LlamaParse API call per single-page PDF.
+
+    Runs LLAMA_CONCURRENCY (default 5) calls in parallel and returns the
+    markdown strings in original page order.
+    """
+    api_key = _llama_api_key()
+    if not api_key:
+        raise RuntimeError("LLAMA_CLOUD_API_KEY not configured")
+
+    from llama_cloud import LlamaCloud
+
+    client = LlamaCloud(api_key=api_key, base_url=LLAMA_CLOUD_BASE, timeout=timeout_seconds)
+    page_pdfs = split_pdf_single_pages(data)
+
+    results = [""] * len(page_pdfs)
+    errors = {}
+
+    def work(idx: int):
+        try:
+            results[idx] = _llama_parse_one(
+                client, page_pdfs[idx], f"page-{idx + 1}.pdf"
+            )
+        except Exception as e:
+            errors[idx] = e
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=max(1, LLAMA_CONCURRENCY)) as pool:
+        list(pool.map(work, range(len(page_pdfs))))
+
+    if len(errors) == len(page_pdfs):
+        raise RuntimeError(f"All {len(errors)} LlamaParse page calls failed; first error: {list(errors.values())[0]}")
+
+    # Pad any missing/failed pages so ordering stays intact; the app flags
+    # empty pages as scanned and routes them through AI OCR.
+    return results
+
+
 def _local_pdf_pages(pdf) -> list:
     """Local pypdfium2 extraction; returns list of (text, scanned_flag)."""
     out = []
@@ -131,12 +216,15 @@ async def parse_pdf(request: Request):
         filename = request.headers.get("x-file-name", "document.pdf")
         scanned_count = 0
 
-        # Primary: LlamaParse (LlamaIndex cloud) — handles scans, tables, layouts
+        # Primary: LlamaParse (LlamaIndex cloud), one API call per page with
+        # LLAMA_CONCURRENCY parallel calls — handles scans, tables, layouts
         llama_pages = None
         parser_used = "pypdfium2"
         if _llama_api_key():
             try:
-                llama_pages = await _run_llama(llama_parse_pdf, data, filename)
+                llama_pages = await _run_llama(
+                    llama_parse_pdf_per_page, data, filename, page_count
+                )
                 parser_used = "llamaparse"
             except Exception as e:
                 print(f"[LlamaParse] failed, falling back to pypdfium2: {e}")
@@ -170,10 +258,10 @@ async def parse_pdf(request: Request):
         pdf.close()
 
 
-async def _run_llama(fn, data: bytes, filename: str):
+async def _run_llama(fn, *args):
     """Run blocking LlamaParse calls off the event loop."""
     import anyio
-    return await anyio.to_thread.run_sync(lambda: fn(data, filename))
+    return await anyio.to_thread.run_sync(lambda: fn(*args))
 
 
 @app.post("/api/pdf/page-image")
