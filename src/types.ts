@@ -91,7 +91,7 @@ export interface ExtractedField {
   source_section: string;
   evidence: string;
   confidence: number;
-  extraction_method: 'gemini_markdown' | 'deterministic_parser' | 'manual_override';
+  extraction_method: 'ox_alpha_markdown' | 'deterministic_parser' | 'manual_override';
   review_required: boolean;
 }
 

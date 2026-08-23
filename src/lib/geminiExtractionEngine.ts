@@ -331,7 +331,7 @@ export async function runStructuredExtraction(
       let finalSection = localResult.source_section;
       let finalEvidence = localResult.evidence;
       let finalConfidence = localResult.confidence;
-      let method: 'gemini_markdown' | 'deterministic_parser' = 'deterministic_parser';
+      let method: 'ox_alpha_markdown' | 'deterministic_parser' = 'deterministic_parser';
 
       // If Gemini returned a verified fact with evidence
       if (apiResult && apiResult.status === 'FOUND' && apiResult.value !== null && apiResult.value !== undefined) {
@@ -342,9 +342,9 @@ export async function runStructuredExtraction(
         finalSection = apiResult.source_section || localResult.source_section || 'Verified Clause';
         finalEvidence = apiResult.evidence || localResult.evidence;
         finalConfidence = Math.max(apiResult.confidence || 0.95, 0.9);
-        method = 'gemini_markdown';
+        method = 'ox_alpha_markdown';
       } else if (localResult.status === 'FOUND') {
-        method = 'gemini_markdown';
+        method = 'ox_alpha_markdown';
       }
 
       const extractedField: ExtractedField = {

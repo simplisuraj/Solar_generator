@@ -20,22 +20,69 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Lazy GoogleGenAI initialization
-let genaiClient: GoogleGenAI | null = null;
-function getGenAI(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
+// Ox Alpha AI engine (OpenAI-compatible via OpenRouter)
+const OXALPHA_API_URL = process.env.OXALPHA_API_URL || 'https://openrouter.ai/api/v1/chat/completions';
+const OXALPHA_MODEL = process.env.OXALPHA_MODEL || 'stealth/ox-alpha';
+
+function getOxAlphaKey(): string {
+  return process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || '';
+}
+
+function hasOxAlphaKey(): boolean {
+  return Boolean(getOxAlphaKey());
+}
+
+interface OxAlphaMessage {
+  role: 'system' | 'user' | 'assistant';
+  content:
+    | string
+    | Array<
+        | { type: 'text'; text: string }
+        | { type: 'image_url'; image_url: { url: string } }
+      >;
+}
+
+async function oxAlphaChat(
+  messages: OxAlphaMessage[],
+  opts: { jsonMode?: boolean; maxTokens?: number } = {}
+): Promise<string | null> {
+  const apiKey = getOxAlphaKey();
   if (!apiKey) return null;
-  if (!genaiClient) {
-    genaiClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
+
+  try {
+    const response = await fetch(OXALPHA_API_URL, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        'HTTP-Referer': process.env.APP_URL || 'http://localhost:3001',
+        'X-Title': 'Credit Appraisal Studio'
       },
+      body: JSON.stringify({
+        model: OXALPHA_MODEL,
+        messages,
+        max_tokens: opts.maxTokens ?? 8192,
+        ...(opts.jsonMode ? { response_format: { type: 'json_object' } } : {})
+      })
     });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.warn(`[Ox Alpha] HTTP ${response.status}: ${errText.slice(0, 160)}`);
+      return null;
+    }
+
+    const data: any = await response.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if (typeof content === 'string' && content.trim()) {
+      return content;
+    }
+    console.warn('[Ox Alpha] Empty completion content.');
+    return null;
+  } catch (err: any) {
+    console.warn(`[Ox Alpha] Request failed: ${err?.message || err}`);
+    return null;
   }
-  return genaiClient;
 }
 
 // Helper to reliably clean and parse JSON responses from model output
@@ -55,131 +102,79 @@ function safeJsonParse<T>(text: string | undefined | null, fallback: T): T {
   }
 }
 
-// Resilient Gemini structured caller with multi-model fallback & backoff
-const VALID_GEMINI_MODELS = ['gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
-
+// Structured (JSON) generation via Ox Alpha
 async function generateStructuredContent<T>(
   prompt: string,
   schema: any,
   fallbackValue: T
 ): Promise<T> {
-  const ai = getGenAI();
-  if (!ai) {
-    console.warn('[Gemini API] GEMINI_API_KEY not configured on server. Returning fallback.');
+  if (!hasOxAlphaKey()) {
+    console.warn('[Ox Alpha] OPENROUTER_API_KEY not configured on server. Returning fallback.');
     return fallbackValue;
   }
 
-  for (let i = 0; i < VALID_GEMINI_MODELS.length; i++) {
-    const model = VALID_GEMINI_MODELS[i];
-    try {
-      console.log(`[Gemini API] Dispatching structured request to ${model}...`);
-      const response = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: schema,
-        }
-      });
-      const parsed = safeJsonParse<T | null>(response.text, null);
-      if (parsed) {
-        console.log(`[Gemini API] Successfully generated structured output from ${model}.`);
-        return parsed;
-      }
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      const isQuotaOrRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
-      const isUnavailable = msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('high demand');
-      
-      console.warn(`[Gemini API] ${model} warning (${isQuotaOrRateLimit ? 'Quota / 429' : msg.slice(0, 120)}). ${i < VALID_GEMINI_MODELS.length - 1 ? 'Attempting alternate model.' : 'Using fallback.'}`);
-      
-      // If temporary rate limit, slight pause before trying the next tier model
-      if ((isQuotaOrRateLimit || isUnavailable) && i < VALID_GEMINI_MODELS.length - 1) {
-        await new Promise((r) => setTimeout(r, 400));
-      }
-    }
-  }
+  const messages: OxAlphaMessage[] = [
+    {
+      role: 'system',
+      content:
+        'You are a precise JSON generator. Respond with ONLY a single JSON object — no prose, no markdown fences. It must conform to this JSON Schema:\n' +
+        JSON.stringify(schema)
+    },
+    { role: 'user', content: prompt }
+  ];
 
+  let text = await oxAlphaChat(messages, { jsonMode: true });
+  if (!text) {
+    // Retry without response_format in case the model rejects json mode
+    text = await oxAlphaChat(messages, { maxTokens: 8192 });
+  }
+  if (text) {
+    const parsed = safeJsonParse<T | null>(text, null);
+    if (parsed) return parsed;
+  }
   return fallbackValue;
 }
 
-// Resilient Gemini text caller with multi-model fallback
+// Plain text generation via Ox Alpha
 async function generateTextContent(
   prompt: string,
   fallbackText: string
 ): Promise<string> {
-  const ai = getGenAI();
-  if (!ai) return fallbackText;
+  if (!hasOxAlphaKey()) return fallbackText;
 
-  for (let i = 0; i < VALID_GEMINI_MODELS.length; i++) {
-    const model = VALID_GEMINI_MODELS[i];
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: prompt,
-      });
-      if (response.text && response.text.trim()) {
-        return response.text;
-      }
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      const isQuotaOrRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
-      console.warn(`[Gemini API] ${model} text generation warning (${isQuotaOrRateLimit ? 'Quota / 429' : msg.slice(0, 120)}).`);
-      if (isQuotaOrRateLimit && i < VALID_GEMINI_MODELS.length - 1) {
-        await new Promise((r) => setTimeout(r, 300));
-      }
-    }
+  const text = await oxAlphaChat([{ role: 'user', content: prompt }]);
+  if (text && text.trim()) {
+    return text;
   }
-
   return fallbackText;
 }
 
-// Vision-capable text generation: sends an optional page image (base64) with
-// the prompt so scanned pages can be transcribed by the AI parser.
+// Vision-capable generation: sends a page image so scanned documents can be
+// transcribed into structured Markdown by Ox Alpha.
 async function generateVisionTextContent(
   prompt: string,
   imageBase64: string,
   imageMimeType: string
 ): Promise<string | null> {
-  const ai = getGenAI();
-  if (!ai) return null;
+  if (!hasOxAlphaKey()) return null;
 
-  for (let i = 0; i < VALID_GEMINI_MODELS.length; i++) {
-    const model = VALID_GEMINI_MODELS[i];
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { inlineData: { mimeType: imageMimeType, data: imageBase64 } },
-              { text: prompt }
-            ]
-          }
-        ]
-      });
-      if (response.text && response.text.trim()) {
-        return response.text;
-      }
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      const isQuotaOrRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
-      console.warn(`[Gemini API] ${model} vision warning (${isQuotaOrRateLimit ? 'Quota / 429' : msg.slice(0, 120)}).`);
-      if (isQuotaOrRateLimit && i < VALID_GEMINI_MODELS.length - 1) {
-        await new Promise((r) => setTimeout(r, 300));
-      }
+  const dataUrl = `data:${imageMimeType};base64,${imageBase64}`;
+  return await oxAlphaChat([
+    {
+      role: 'user',
+      content: [
+        { type: 'image_url', image_url: { url: dataUrl } },
+        { type: 'text', text: prompt }
+      ]
     }
-  }
-
-  return null;
+  ]);
 }
 
 // Health Check
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+    hasGeminiKey: hasOxAlphaKey(),
     timestamp: new Date().toISOString()
   });
 });
@@ -250,14 +245,13 @@ app.post('/api/pdf/page-image', express.raw({ type: '*/*', limit: '100mb' }) as 
 // 0. Page-Level Markdown Parser Endpoint (Structures tables, clauses, and headers)
 app.post('/api/gemini/parse-page', async (req, res) => {
   const { document_id, filename, page_number, total_pages, raw_text, use_ocr, page_image } = req.body;
-  const ai = getGenAI();
 
   // Scanned page: no text layer but an AI parser image is available.
   if ((!raw_text || !raw_text.trim()) && page_image && page_image.data) {
-    if (!ai) {
+    if (!hasOxAlphaKey()) {
       return res.json({
-        markdown: `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "gemini_markdown"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n[Scanned page — GEMINI_API_KEY not configured on server for AI OCR parsing]`,
-        parser: 'gemini_markdown'
+        markdown: `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "ox_alpha_vision"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n[Scanned page — OPENROUTER_API_KEY not configured on server for AI OCR parsing]`,
+        parser: 'ox_alpha_vision'
       });
     }
 
@@ -280,7 +274,7 @@ Rules:
         `source_file: "${filename || 'unknown'}"`,
         `page_number: ${page_number || 1}`,
         `total_pages: ${total_pages || 1}`,
-        `parser: "gemini_vision_scanned"`,
+        `parser: "ox_alpha_vision_scanned"`,
         `processed_at: "${new Date().toISOString()}"`,
         '---',
         '',
@@ -289,7 +283,7 @@ Rules:
         parsedBody
       ].join('\n');
 
-      return res.json({ markdown: header, parser: 'gemini_vision_scanned' });
+      return res.json({ markdown: header, parser: 'ox_alpha_vision_scanned' });
     } catch (err) {
       console.warn('[Gemini API] scanned-page parse failed:', err);
     }
@@ -297,14 +291,14 @@ Rules:
 
   if (!raw_text || !raw_text.trim()) {
     return res.json({
-      markdown: `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "gemini_markdown"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n[Empty Page / No searchable text]`,
-      parser: 'gemini_markdown'
+      markdown: `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "ox_alpha_markdown"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n[Empty Page / No searchable text]`,
+      parser: 'ox_alpha_markdown'
     });
   }
 
   const defaultRawFormatted = raw_text.trim();
 
-  if (!ai) {
+  if (!hasOxAlphaKey()) {
     const fallbackMd = `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "llamaindex_native"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n${defaultRawFormatted}`;
     return res.json({ markdown: fallbackMd, parser: 'llamaindex_native' });
   }
@@ -329,7 +323,7 @@ ${(raw_text || '').slice(0, 15000)}`;
       `source_file: "${filename || 'unknown'}"`,
       `page_number: ${page_number || 1}`,
       `total_pages: ${total_pages || 1}`,
-      `parser: "gemini_page_parser"`,
+      `parser: "ox_alpha_page_parser"`,
       `processed_at: "${new Date().toISOString()}"`,
       '---',
       '',
@@ -338,7 +332,7 @@ ${(raw_text || '').slice(0, 15000)}`;
       parsedBody
     ].join('\n');
 
-    return res.json({ markdown: header, parser: 'gemini_page_parser' });
+    return res.json({ markdown: header, parser: 'ox_alpha_page_parser' });
   } catch (err) {
     console.warn('[Gemini API] parse-page fallback triggered:', err);
     const fallbackMd = `---\ndocument_id: ${document_id || 'doc'}\nsource_file: "${filename || 'unknown'}"\npage_number: ${page_number || 1}\ntotal_pages: ${total_pages || 1}\nparser: "llamaindex_native"\nprocessed_at: "${new Date().toISOString()}"\n---\n\n# Page ${page_number || 1}\n\n${raw_text.trim()}`;
@@ -440,7 +434,7 @@ app.post('/api/gemini/extract-from-markdown', async (req, res) => {
       source_section: '',
       evidence: '',
       confidence: 0.0,
-      extraction_method: 'gemini_markdown',
+      extraction_method: 'ox_alpha_markdown',
       review_required: false
     }))
   };

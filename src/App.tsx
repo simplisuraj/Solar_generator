@@ -147,7 +147,7 @@ export function App() {
       source_section: '',
       evidence: '',
       confidence: 0.0,
-      extraction_method: 'gemini_markdown',
+      extraction_method: 'ox_alpha_markdown',
       review_required: false
     }));
     setFields(initialFields);
