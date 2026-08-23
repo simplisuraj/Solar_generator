@@ -372,7 +372,7 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
   if (lower.endsWith('.pdf')) {
     try {
       const parsed = await parsePdfViaBackend(file);
-      if (parsed) return parsed;
+      if (parsed) return { text: parsed.text, pageCount: parsed.pageCount || 1 };
     } catch (e) {
       console.warn('Python PDF parsing unavailable, falling back to raw scan:', e);
     }
@@ -389,7 +389,7 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
   if (lower.endsWith('.docx')) {
     try {
       const parsed = await parseDocxViaBackend(file);
-      if (parsed) return parsed;
+      if (parsed) return { text: parsed.text, pageCount: parsed.pageCount || 1 };
     } catch (e) {
       console.warn('Python DOCX parsing unavailable, falling back to JSZip:', e);
     }
@@ -401,7 +401,71 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
   return { text: rawText, pageCount };
 }
 
+// Parse a PDF via the Python (pypdfium2) backend for an exact page count
+// and page-aligned text. Returns null if the service is unavailable so the
+// caller can fall back to client-side heuristics.
+async function parsePdfViaBackend(file: File): Promise<IngestedFile | null> {
+  const res = await fetch('/api/pdf/parse', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/pdf',
+      'x-file-name': encodeURIComponent(file.name)
+    },
+    body: file
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (!data || typeof data.pageCount !== 'number' || !data.text) return null;
+  const text = data.text as string;
+  return {
+    name: data.fileName || file.name,
+    type: 'application/pdf',
+    size: file.size,
+    text,
+    parserMethod: `Python pypdfium2${data.isMostlyScanned ? ' (scanned — OCR recommended)' : ''}`,
+    charCount: text.length,
+    pageCount: data.pageCount,
+    uploadedAt: new Date().toISOString()
+  };
+}
+
+// Parse a DOCX via the Python backend; falls back to JSZip on failure.
+async function parseDocxViaBackend(file: File): Promise<IngestedFile | null> {
+  const res = await fetch('/api/docx/parse', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'x-file-name': encodeURIComponent(file.name)
+    },
+    body: file
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (!data || !data.text) return null;
+  const text = data.text as string;
+  const pageCount = calculateAccuratePageCount({ name: file.name, text });
+  return {
+    name: data.fileName || file.name,
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    size: file.size,
+    text,
+    parserMethod: 'Python DOCX structural parser',
+    charCount: text.length,
+    pageCount,
+    uploadedAt: new Date().toISOString()
+  };
+}
+
 function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      resolve((e.target?.result as string) || '');
+    };
+    reader.onerror = () => resolve('');
+    reader.readAsText(file);
+  });
+}
 
 // Detect PDF page count from raw bytes. Scanned PDFs store page objects in
 // compressed object streams, so a plain "/Type /Page" scan on decoded text
