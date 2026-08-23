@@ -46,6 +46,15 @@ def _llama_api_key() -> str:
     return os.environ.get("LLAMA_CLOUD_API_KEY", "")
 
 
+def _new_llama_client(timeout_seconds: int = 240):
+    from llama_cloud import LlamaCloud
+    return LlamaCloud(
+        api_key=_llama_api_key(),
+        base_url=LLAMA_CLOUD_BASE,
+        timeout=timeout_seconds,
+    )
+
+
 def _clean_text(text: str) -> str:
     text = text.replace("\x00", "")
     return re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -234,6 +243,118 @@ def parse_pdf_with_page_cache(data: bytes, filename: str, page_count: int):
     pages = _read_cached_pages(cache, page_count)
     newly_parsed = sum(1 for idx in results if results[idx])
     return pages, cached_count, newly_parsed
+
+
+@app.post("/api/pdf/inspect")
+async def inspect_pdf(request: Request):
+    """Fast local inspection only — no LlamaParse calls, no credits used.
+
+    Returns the exact page count and scanned-page estimate so Stage 2 can
+    show the correct LED grid before any parsing starts.
+    """
+    data = await request.body()
+    if not data:
+        return JSONResponse(status_code=400, content={"error": "Empty upload"})
+    if not data[:5] == b"%PDF-":
+        return JSONResponse(status_code=400, content={"error": "Not a PDF file"})
+
+    try:
+        pdf = pdfium.PdfDocument(io.BytesIO(data))
+    except Exception as e:
+        return JSONResponse(status_code=422, content={"error": f"Unreadable PDF: {e}"})
+
+    try:
+        page_count = len(pdf)
+        scanned_count = 0
+        for text, scanned in _local_pdf_pages(pdf):
+            if scanned:
+                scanned_count += 1
+        file_hash = _file_hash(data)
+        cache = _cache_dir(file_hash)
+        cached_pages = sum(
+            1 for i in range(1, page_count + 1) if os.path.exists(_page_cache_path(cache, i))
+        )
+        return {
+            "fileName": request.headers.get("x-file-name", "document.pdf"),
+            "pageCount": page_count,
+            "scannedPages": scanned_count,
+            "isMostlyScanned": page_count > 0 and scanned_count > page_count / 2,
+            "fileHash": file_hash,
+            "cachedPages": cached_pages,
+            "allCached": page_count > 0 and cached_pages == page_count,
+        }
+    finally:
+        pdf.close()
+
+
+@app.post("/api/pdf/page-parse")
+async def parse_single_page_pdf(request: Request):
+    """Parse ONE page of an uploaded PDF via LlamaParse (Stage 2 LED flow).
+
+    - Cache hit: returns the cached page-N.md instantly, zero API calls
+    - Cache miss: splits out that single page, makes exactly one LlamaParse
+      call, saves page-N.md
+    - When the last page lands, stitches every page .md into final.md
+    """
+    data = await request.body()
+    if not data:
+        return JSONResponse(status_code=400, content={"error": "Empty upload"})
+    if not data[:5] == b"%PDF-":
+        return JSONResponse(status_code=400, content={"error": "Not a PDF file"})
+
+    page_number = int(request.headers.get("x-page-number", "1"))
+    filename = request.headers.get("x-file-name", "document.pdf")
+
+    try:
+        pdf = pdfium.PdfDocument(io.BytesIO(data))
+    except Exception as e:
+        return JSONResponse(status_code=422, content={"error": f"Unreadable PDF: {e}"})
+
+    try:
+        page_count = len(pdf)
+        if page_number < 1 or page_number > page_count:
+            return JSONResponse(status_code=400, content={"error": f"Page {page_number} out of range (1-{page_count})"})
+
+        cache = _cache_dir(_file_hash(data))
+        page_path = _page_cache_path(cache, page_number)
+
+        cached = os.path.exists(page_path)
+        if not cached:
+            try:
+                page_pdfs = await _run_llama(split_pdf_single_pages, data)
+                client = _new_llama_client()
+                md = await _run_llama(_llama_parse_one, client, page_pdfs[page_number - 1], f"page-{page_number}.pdf")
+            except Exception as e:
+                print(f"[LlamaParse] page {page_number} failed: {e}")
+                return JSONResponse(status_code=502, content={"error": f"LlamaParse page parse failed: {e}"})
+            with open(page_path, "w", encoding="utf-8") as f:
+                f.write(md)
+
+        with open(page_path, encoding="utf-8") as f:
+            markdown = f.read()
+
+        cached_pages = sum(
+            1 for i in range(1, page_count + 1) if os.path.exists(_page_cache_path(cache, i))
+        )
+        all_present = cached_pages == page_count
+        stitched = os.path.exists(os.path.join(cache, "final.md"))
+        if all_present and not stitched:
+            pages_md = _read_cached_pages(cache, page_count)
+            await _run_llama(_stitch_final_md, cache, filename, pages_md)
+            stitched = True
+
+        return {
+            "fileName": filename,
+            "page": page_number,
+            "pageCount": page_count,
+            "markdown": markdown,
+            "cached": cached,
+            "cachedPages": cached_pages,
+            "allPagesDone": all_present,
+            "stitched": stitched,
+        }
+    finally:
+        pdf.close()
 
 
 @app.post("/api/pdf/parse")

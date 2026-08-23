@@ -161,6 +161,47 @@ app.get('/api/health', (req, res) => {
 // Proxy document parsing to the Python (FastAPI + pypdfium2) service
 const PARSER_SERVICE_URL = process.env.PARSER_SERVICE_URL || 'http://127.0.0.1:3002';
 
+app.post('/api/pdf/inspect', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
+  (async () => {
+    try {
+      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/pdf/inspect`, {
+        method: 'POST',
+        headers: {
+          'content-type': req.headers['content-type'] || 'application/pdf',
+          'x-file-name': String(req.headers['x-file-name'] || 'document.pdf')
+        },
+        body: req.body
+      });
+      const data = await fetchRes.json();
+      res.status(fetchRes.status).json(data);
+    } catch (err: any) {
+      console.warn('[Parser Proxy] /api/pdf/inspect failed:', err?.message || err);
+      res.status(503).json({ error: 'Python parser service unavailable' });
+    }
+  })();
+});
+
+app.post('/api/pdf/page-parse', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
+  (async () => {
+    try {
+      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/pdf/page-parse`, {
+        method: 'POST',
+        headers: {
+          'content-type': req.headers['content-type'] || 'application/pdf',
+          'x-page-number': String(req.headers['x-page-number'] || '1'),
+          'x-file-name': String(req.headers['x-file-name'] || 'document.pdf')
+        },
+        body: req.body
+      });
+      const data = await fetchRes.json();
+      res.status(fetchRes.status).json(data);
+    } catch (err: any) {
+      console.warn('[Parser Proxy] /api/pdf/page-parse failed:', err?.message || err);
+      res.status(503).json({ error: 'Python parser service unavailable' });
+    }
+  })();
+});
+
 app.post('/api/pdf/parse', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
   // express.raw consumed the body; re-dispatch using buffered body
   (async () => {

@@ -130,6 +130,62 @@ export class LlamaIndexDocumentParser implements DocumentParser {
     let raw = params.pageRawText || '';
     const hasSearchable = raw.trim().length > 15;
 
+    // PDF pages are parsed by LlamaParse — one API call per page, triggered
+    // from the Stage 2 LED monitor so the user sees live progress. Cached
+    // pages return instantly with zero credit usage.
+    if (params.rawSourceFile instanceof Blob) {
+      try {
+        const buf = await params.rawSourceFile.arrayBuffer();
+        const resp = await fetch('/api/pdf/page-parse', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/pdf',
+            'x-page-number': String(params.pageNumber),
+            'x-file-name': encodeURIComponent(params.filename)
+          },
+          body: buf
+        });
+
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && typeof data.markdown === 'string') {
+            const elapsed = parseFloat(((performance.now() - startTime) / 1000).toFixed(2));
+            const mdBody = data.markdown.trim()
+              || `[No content extracted for page ${params.pageNumber} — likely a blank or image-only scan]`;
+            const finalMarkdown = formatPageMarkdown(
+              params.documentId,
+              params.filename,
+              params.pageNumber,
+              data.pageCount || params.totalPages,
+              mdBody,
+              data.cached ? 'llamaparse_cached' : 'llamaparse_agentic'
+            );
+            return {
+              markdown: finalMarkdown,
+              pageNumber: params.pageNumber,
+              metadata: {
+                charCount: finalMarkdown.length,
+                hasSearchableText: mdBody.length > 15,
+                parser: data.cached ? 'llamaparse_cached' : 'llamaparse_agentic',
+                cached: Boolean(data.cached),
+                cachedPages: data.cachedPages,
+                allPagesDone: Boolean(data.allPagesDone),
+                stitched: Boolean(data.stitched)
+              },
+              parser: data.cached ? 'llamaparse_cached' : 'llamaparse_agentic',
+              processingTimeSeconds: Math.max(0.2, elapsed)
+            };
+          }
+        } else {
+          const errData = await resp.json().catch(() => null);
+          throw new Error(errData?.error || `page-parse HTTP ${resp.status}`);
+        }
+      } catch (e: any) {
+        console.warn('[PageParser] LlamaParse per-page parse failed:', e?.message || e);
+        // fall through to text-based flow below
+      }
+    }
+
     // First attempt real server-side API call to structure page markdown
     try {
       const resp = await fetch('/api/gemini/parse-page', {

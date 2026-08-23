@@ -370,13 +370,14 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
     }
   }
 
-  // PDF files: parse structurally via the Python (pypdfium2) backend
+  // PDF files: fast local inspection only — exact page count via pypdfium2.
+  // Actual LlamaParse calls happen per page in Stage 2 (Page Parse Monitor).
   if (lower.endsWith('.pdf')) {
     try {
-      const parsed = await parsePdfViaBackend(file);
-      if (parsed) return { text: parsed.text, pageCount: parsed.pageCount || 1 };
+      const inspected = await inspectPdfViaBackend(file);
+      if (inspected) return inspected;
     } catch (e) {
-      console.warn('Python PDF parsing unavailable, falling back to raw scan:', e);
+      console.warn('PDF inspection unavailable, falling back to raw scan:', e);
     }
     try {
       const text = await readFileAsText(file);
@@ -403,11 +404,10 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
   return { text: rawText, pageCount };
 }
 
-// Parse a PDF via the Python (pypdfium2) backend for an exact page count
-// and page-aligned text. Returns null if the service is unavailable so the
-// caller can fall back to client-side heuristics.
-async function parsePdfViaBackend(file: File): Promise<IngestedFile | null> {
-  const res = await fetch('/api/pdf/parse', {
+// Inspect a PDF via the Python backend: exact page count, zero LlamaParse
+// credits. Per-page parsing happens later in the Page Parse Monitor.
+async function inspectPdfViaBackend(file: File): Promise<IngestedFile | null> {
+  const res = await fetch('/api/pdf/inspect', {
     method: 'POST',
     headers: {
       'content-type': 'application/pdf',
@@ -417,17 +417,24 @@ async function parsePdfViaBackend(file: File): Promise<IngestedFile | null> {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  if (!data || typeof data.pageCount !== 'number' || !data.text) return null;
-  const text = data.text as string;
+  if (!data || typeof data.pageCount !== 'number') return null;
+
+  const scannedNote = data.allPagesDone
+    ? `all ${data.pageCount} pages cached`
+    : data.isMostlyScanned
+      ? 'scanned — LlamaParse per page in Stage 2'
+      : `LlamaParse per page in Stage 2${data.cachedPages ? `, ${data.cachedPages} cached` : ''}`;
+
   return {
     name: data.fileName || file.name,
     type: 'application/pdf',
     size: file.size,
-    text,
-    parserMethod: `Python pypdfium2${data.isMostlyScanned ? ' (scanned — OCR recommended)' : ''}`,
-    charCount: text.length,
+    text: `[PDF attached for page-level parsing: ${data.pageCount} pages]`,
+    parserMethod: `LlamaParse (agentic) — ${scannedNote}`,
+    charCount: 0,
     pageCount: data.pageCount,
-    uploadedAt: new Date().toISOString()
+    uploadedAt: new Date().toISOString(),
+    rawBlob: file
   };
 }
 
