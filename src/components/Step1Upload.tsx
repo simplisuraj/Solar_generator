@@ -368,15 +368,30 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
     }
   }
 
-  // PDF files: detect page count and extract text
+  // PDF files: parse structurally via the Python (pypdfium2) backend
   if (lower.endsWith('.pdf')) {
     try {
+      const parsed = await parsePdfViaBackend(file);
+      if (parsed) return parsed;
+    } catch (e) {
+      console.warn('Python PDF parsing unavailable, falling back to raw scan:', e);
+    }
+    try {
       const text = await readFileAsText(file);
-      const pageMatches = text.match(/\/Type\s*\/Page\b/g);
-      const detectedPages = pageMatches ? pageMatches.length : calculateAccuratePageCount({ name: file.name, text });
+      const detectedPages = await detectPdfPageCount(file, text);
       return { text, pageCount: Math.max(1, detectedPages) };
     } catch (e) {
       console.warn('PDF parsing error:', e);
+    }
+  }
+
+  // DOCX files: prefer the Python structural parser
+  if (lower.endsWith('.docx')) {
+    try {
+      const parsed = await parseDocxViaBackend(file);
+      if (parsed) return parsed;
+    } catch (e) {
+      console.warn('Python DOCX parsing unavailable, falling back to JSZip:', e);
     }
   }
 
@@ -387,13 +402,63 @@ async function parseUploadedFile(file: File, useOCR: boolean): Promise<{ text: s
 }
 
 function readFileAsText(file: File): Promise<string> {
+
+// Detect PDF page count from raw bytes. Scanned PDFs store page objects in
+// compressed object streams, so a plain "/Type /Page" scan on decoded text
+// misses them. Decode as latin1 (byte-preserving) and combine multiple signals:
+// the page tree "/Count N" entries, "/Type /Page" object occurrences, and an
+// image-density heuristic for pure scans.
+async function detectPdfPageCount(file: File, text: string): Promise<number> {
+  const candidates: number[] = [];
+
+  try {
+    const raw = await readFileAsLatin1(file);
+
+    // Page tree counts: root node's Count equals total page count
+    const countMatches = Array.from(raw.matchAll(/\/Count\s+(\d+)/g));
+    for (const m of countMatches) {
+      const v = parseInt(m[1], 10);
+      if (v > 0 && v < 100000) candidates.push(v);
+    }
+
+    // Uncompressed page objects
+    const typePageMatches = raw.match(/\/Type\s*\/Page[^s]/g);
+    if (typePageMatches) candidates.push(typePageMatches.length);
+
+    // Compressed object streams: count decompressed stream blocks containing
+    // page dictionaries is not possible without full parsing; instead fall
+    // back to counting "/Kids" arrays length hints via "N 0 R" inside Kids
+    const kidsMatch = raw.match(/\/Kids\s*\[([^\]]*)\]/);
+    if (kidsMatch) {
+      const kidCount = (kidsMatch[1].match(/\d+\s+\d+\s+R/g) || []).length;
+      if (kidCount > 0) candidates.push(kidCount);
+    }
+  } catch {
+    // ignore — fall through to text-based heuristics
+  }
+
+  const structural = candidates.length > 0 ? Math.max(...candidates) : 0;
+  if (structural > 0) return structural;
+
+  // Scanned-PDF heuristic: almost no extractable text but a large binary body.
+  // Typical scanned pages are 50–300 KB of JPEG/JPX data each.
+  const printable = text.replace(/[^\x20-\x7E\n\r\t]/g, '');
+  const textDensity = printable.length / Math.max(1, file.size);
+  if (textDensity < 0.05 && file.size > 100 * 1024) {
+    return Math.max(1, Math.round(file.size / (150 * 1024)));
+  }
+
+  return calculateAccuratePageCount({ name: file.name, text });
+}
+
+function readFileAsLatin1(file: File): Promise<string> {
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       resolve((e.target?.result as string) || '');
     };
     reader.onerror = () => resolve('');
-    reader.readAsText(file);
+    reader.readAsText(file, 'latin1');
   });
 }
 

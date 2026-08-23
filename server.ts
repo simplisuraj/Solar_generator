@@ -135,6 +135,48 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Proxy document parsing to the Python (FastAPI + pypdfium2) service
+const PARSER_SERVICE_URL = process.env.PARSER_SERVICE_URL || 'http://127.0.0.1:3002';
+
+app.post('/api/pdf/parse', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
+  // express.raw consumed the body; re-dispatch using buffered body
+  (async () => {
+    try {
+      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/pdf/parse`, {
+        method: 'POST',
+        headers: {
+          'content-type': req.headers['content-type'] || 'application/octet-stream'
+        },
+        body: req.body
+      });
+      const data = await fetchRes.json();
+      res.status(fetchRes.status).json(data);
+    } catch (err: any) {
+      console.warn('[Parser Proxy] /api/pdf/parse failed:', err?.message || err);
+      res.status(503).json({ error: 'Python parser service unavailable' });
+    }
+  })();
+});
+
+app.post('/api/docx/parse', express.raw({ type: '*/*', limit: '100mb' }) as any, (req, res) => {
+  (async () => {
+    try {
+      const fetchRes = await fetch(`${PARSER_SERVICE_URL}/api/docx/parse`, {
+        method: 'POST',
+        headers: {
+          'content-type': req.headers['content-type'] || 'application/octet-stream'
+        },
+        body: req.body
+      });
+      const data = await fetchRes.json();
+      res.status(fetchRes.status).json(data);
+    } catch (err: any) {
+      console.warn('[Parser Proxy] /api/docx/parse failed:', err?.message || err);
+      res.status(503).json({ error: 'Python parser service unavailable' });
+    }
+  })();
+});
+
 // 0. Page-Level Markdown Parser Endpoint (Structures tables, clauses, and headers)
 app.post('/api/gemini/parse-page', async (req, res) => {
   const { document_id, filename, page_number, total_pages, raw_text, use_ocr } = req.body;
