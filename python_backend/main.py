@@ -13,6 +13,18 @@ import os
 import re
 import time
 
+# Load repo-root .env (service runs from python_backend/)
+for _env_path in (os.path.join(os.path.dirname(__file__), "..", ".env"), os.path.join(os.getcwd(), ".env")):
+    try:
+        with open(_env_path) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _, _v = _line.partition("=")
+                    os.environ.setdefault(_k.strip().strip('"'), _v.strip().strip('"'))
+    except FileNotFoundError:
+        pass
+
 import base64
 import httpx
 
@@ -73,8 +85,9 @@ def llama_parse_pdf(data: bytes, filename: str, timeout_seconds: int = 240):
             return [full.strip()]
         raise RuntimeError("LlamaParse returned no markdown content")
 
-    if not any(out):
-        raise RuntimeError("LlamaParse returned only empty page markdown")
+    # Blank/scanned pages legitimately produce empty markdown; the app flags
+    # those as scanned and routes them through AI OCR. Only fail if the
+    # result structure itself is unusable.
     return out
 
 
